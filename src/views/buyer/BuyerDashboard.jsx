@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from "react";
-import { ClipboardList, Plus, Store, Handshake, ShoppingBasket, PackageSearch, TrendingUp, ArrowUpRight, MapPin } from "lucide-react";
+import { ClipboardList, Plus, Store, Handshake, PackageSearch, TrendingUp, ArrowUpRight, MapPin } from "lucide-react";
+import DashboardProfilePhoto from "../../components/DashboardProfilePhoto.jsx";
 import GlassCard from "../../components/GlassCard.jsx";
 import EmptyState from "../../components/EmptyState.jsx";
 import BigAction from "../../components/BigAction.jsx";
@@ -98,8 +99,8 @@ export default function BuyerDashboard({ user, onNavigate }) {
               <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#78B7D2]" /> Supply discovery</span>
             </div>
           </div>
-          <div className="hidden shrink-0 sm:flex sm:h-28 sm:w-28 sm:items-center sm:justify-center sm:rounded-[30px] sm:border sm:border-white/90 sm:bg-white/65 sm:shadow-[0_10px_28px_rgba(46,125,50,0.10)]">
-            <ShoppingBasket size={54} strokeWidth={1.6} className="text-[#32833A]" />
+          <div className="hidden shrink-0 overflow-hidden sm:flex sm:h-28 sm:w-28 sm:items-center sm:justify-center sm:rounded-[30px] sm:border sm:border-white/90 sm:bg-white/65 sm:shadow-[0_10px_28px_rgba(46,125,50,0.10)]">
+            <DashboardProfilePhoto user={user} />
           </div>
         </div>
       </section>

@@ -270,6 +270,7 @@ export default function MySupply({ intent, onNavigate, user }) {
   const [q, setQ] = useState("");
   const [prod, setProd] = useState("all");
   const [status, setStatus] = useState("all");
+  const [supplyType, setSupplyType] = useState("all");
   const [sort, setSort] = useState("newest");
   const [page, setPage] = useState(1);
   const [form, setForm] = useState(null);
@@ -285,19 +286,35 @@ export default function MySupply({ intent, onNavigate, user }) {
     []
   );
   useEffect(() => { load(); const t = setInterval(load, 15000); window.addEventListener("focus", load); return () => { clearInterval(t); window.removeEventListener("focus", load); }; }, [load]);
-  useEffect(() => { if (intent === "create") { setNote(""); setForm({}); } }, [intent]);
-  useEffect(() => { setPage(1); }, [q, prod, status, sort]);
+  useEffect(() => {
+    if (intent === "create") {
+      setNote("");
+      setForm({});
+      return;
+    }
+    if (["active", "onhand", "expected"].includes(intent)) {
+      setStatus("active");
+      setSupplyType(intent === "onhand" ? "onhand" : intent === "expected" ? "expected" : "all");
+      setPage(1);
+    } else {
+      setStatus("all");
+      setSupplyType("all");
+      setPage(1);
+    }
+  }, [intent]);
+  useEffect(() => { setPage(1); }, [q, prod, status, supplyType, sort]);
 
   const names = useMemo(() => [...new Set((rows || []).map((s) => s.product))].sort(), [rows]);
   const shown = useMemo(() => {
     const n = q.trim().toLowerCase();
     const list = (rows || []).filter((s) =>
       (prod === "all" || s.product === prod) &&
-      (status === "all" || stockInfo(s).key === status) &&
+      (status === "all" || (status === "active" ? s.status === "available" : stockInfo(s).key === status)) &&
+      (supplyType === "all" || s.supplyType === supplyType) &&
       (!n || `${s.product} ${s.location} ${s.category || ""}`.toLowerCase().includes(n)));
     list.sort((a, b) => sort === "name" ? a.product.localeCompare(b.product) : sort === "oldest" ? new Date(a.createdAt) - new Date(b.createdAt) : new Date(b.createdAt) - new Date(a.createdAt));
     return list;
-  }, [rows, q, prod, status, sort]);
+  }, [rows, q, prod, status, supplyType, sort]);
   const pageRows = shown.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   function closeForm() { setForm(null); onNavigate?.("supply", null); }
@@ -319,12 +336,15 @@ export default function MySupply({ intent, onNavigate, user }) {
       <LoadNote loading={rows === null && !error} error={error} />
       <Notice type="success">{note}</Notice>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_170px_190px_170px]">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(180px,1fr)_150px_150px_160px_140px]">
         <div className="relative"><Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search your products..." className={inputCls + " !pl-9"} /></div>
         <select value={prod} onChange={(e) => setProd(e.target.value)} className={inputCls}><option value="all">All Products</option>{names.map((n) => <option key={n}>{n}</option>)}</select>
-        <select value={status} onChange={(e) => setStatus(e.target.value)} className={inputCls}>
-          <option value="all">All Status</option><option value="pending">Pending approval</option><option value="available">Available</option><option value="out">Out of Stock</option><option value="rejected">Rejected</option></select>
+        <select value={supplyType} onChange={(e) => setSupplyType(e.target.value)} className={inputCls} aria-label="Filter by supply type">
+          <option value="all">All Supply Types</option><option value="onhand">On Hand</option><option value="expected">Expected</option>
+        </select>
+        <select value={status} onChange={(e) => setStatus(e.target.value)} className={inputCls} aria-label="Filter by supply status">
+          <option value="all">All Status</option><option value="active">Active Supply</option><option value="pending">Pending approval</option><option value="available">Available</option><option value="out">Out of Stock</option><option value="rejected">Rejected</option></select>
         <select value={sort} onChange={(e) => setSort(e.target.value)} className={inputCls}>
           <option value="newest">Sort by: Newest</option><option value="oldest">Sort by: Oldest</option><option value="name">Sort by: Name</option></select>
       </div>

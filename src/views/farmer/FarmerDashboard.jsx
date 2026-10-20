@@ -8,6 +8,7 @@ import useMatchViewModel from "../../viewmodels/useMatchViewModel";
 import { requestRepository } from "../../repositories/requestRepository";
 import { SUPPLY_TYPE_LABEL, SUPPLY_STATUS_LABEL } from "../../models/supply/Supply";
 import { Sprout, Plus, Link2, Inbox, Package, CalendarDays, TrendingUp, ArrowUpRight } from "lucide-react";
+import DashboardProfilePhoto from "../../components/DashboardProfilePhoto.jsx";
 
 export default function FarmerDashboard({ user, onNavigate }) {
   const vm = useSupplyViewModel();
@@ -51,6 +52,7 @@ export default function FarmerDashboard({ user, onNavigate }) {
     {
       label: "Active Supply",
       value: active.length,
+      mode: "active",
       note: "Currently available listings",
       icon: Sprout,
       iconClass: "bg-[#E4F4E2] text-[#2E7D32]",
@@ -58,6 +60,7 @@ export default function FarmerDashboard({ user, onNavigate }) {
     {
       label: "On Hand",
       value: active.filter((s) => s.supplyType === "onhand").length,
+      mode: "onhand",
       note: "Ready to provide",
       icon: Package,
       iconClass: "bg-[#EAF3DC] text-[#648A24]",
@@ -65,6 +68,7 @@ export default function FarmerDashboard({ user, onNavigate }) {
     {
       label: "Expected",
       value: active.filter((s) => s.supplyType === "expected").length,
+      mode: "expected",
       note: "Upcoming harvest listings",
       icon: CalendarDays,
       iconClass: "bg-[#E6F0F7] text-[#39708B]",
@@ -99,8 +103,8 @@ export default function FarmerDashboard({ user, onNavigate }) {
               <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#78B7D2]" /> Buyer coordination</span>
             </div>
           </div>
-          <div className="hidden shrink-0 sm:flex sm:h-28 sm:w-28 sm:items-center sm:justify-center sm:rounded-[30px] sm:border sm:border-white/90 sm:bg-white/65 sm:shadow-[0_10px_28px_rgba(46,125,50,0.10)]">
-            <Sprout size={58} strokeWidth={1.6} className="text-[#32833A]" />
+          <div className="hidden shrink-0 overflow-hidden sm:flex sm:h-28 sm:w-28 sm:items-center sm:justify-center sm:rounded-[30px] sm:border sm:border-white/90 sm:bg-white/65 sm:shadow-[0_10px_28px_rgba(46,125,50,0.10)]">
+            <DashboardProfilePhoto user={user} />
           </div>
         </div>
       </section>
@@ -159,18 +163,26 @@ export default function FarmerDashboard({ user, onNavigate }) {
           </div>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          {cards.map(({ label, value, note, icon: Icon, iconClass }) => (
-            <div key={label} className="group relative overflow-hidden rounded-2xl border border-[#E0EAE0] bg-white/90 p-5 shadow-[0_8px_24px_rgba(22,48,31,0.05)] transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_14px_30px_rgba(22,48,31,0.09)]">
-              <div className="pointer-events-none absolute right-0 top-0 h-20 w-20 rounded-bl-[44px] bg-[#F5FAF2] transition group-hover:bg-[#ECF7E9]" />
-              <div className="relative flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-[13px] font-semibold text-[#65756A] sm:text-[14px]">{label}</p>
-                  <p className="mt-3 text-[34px] font-bold leading-none tracking-tight text-[#16301F]">{vm.loading ? "—" : value}</p>
-                  <p className="mt-2 text-[12px] text-gray-500 sm:text-[13px]">{note}</p>
+          {cards.map(({ label, value, mode, note, icon: Icon, iconClass }) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => onNavigate("supply", mode)}
+              aria-label={`View ${label}`}
+              className="group w-full rounded-2xl text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4CAF50] focus-visible:ring-offset-2"
+            >
+              <div className="relative h-full overflow-hidden rounded-2xl border border-[#E0EAE0] bg-white/90 p-5 shadow-[0_8px_24px_rgba(22,48,31,0.05)] transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_14px_30px_rgba(22,48,31,0.09)]">
+                <div className="pointer-events-none absolute right-0 top-0 h-20 w-20 rounded-bl-[44px] bg-[#F5FAF2] transition group-hover:bg-[#ECF7E9]" />
+                <div className="relative flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-[13px] font-semibold text-[#65756A] sm:text-[14px]">{label}</p>
+                    <p className="mt-3 text-[34px] font-bold leading-none tracking-tight text-[#16301F]">{vm.loading ? "—" : value}</p>
+                    <p className="mt-2 text-[12px] text-gray-500 sm:text-[13px]">{note}</p>
+                  </div>
+                  <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${iconClass}`}><Icon size={21} /></div>
                 </div>
-                <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${iconClass}`}><Icon size={21} /></div>
               </div>
-            </div>
+            </button>
           ))}
         </div>
       </section>

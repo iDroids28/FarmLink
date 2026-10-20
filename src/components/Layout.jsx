@@ -104,7 +104,13 @@ export default function Layout({ user, active, onNavigate, onLogout, headerActio
               </button>
             )}
 
-            <h1 className="min-w-0 truncate text-[17px] font-semibold tracking-tight text-[#16301F]">
+            <h1
+              className={`min-w-0 truncate tracking-tight text-[#16301F] ${
+                active === "dashboard"
+                  ? "text-[22px] font-bold sm:text-[24px]"
+                  : "text-[17px] font-semibold"
+              }`}
+            >
               {current}
             </h1>
 
