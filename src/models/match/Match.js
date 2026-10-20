@@ -6,7 +6,7 @@
 
 export const MATCH_STATUS_LABEL = {
   pending_confirmation: "Pending Confirmation",
-  confirmed: "Confirmed",
+  confirmed: "Confirmed (Pre-ordered)",
   declined: "Declined",
   cancelled: "Cancelled",
 
@@ -25,7 +25,7 @@ export const MATCH_STATUS_TONE = {
   mixed: "amber",
 };
 
-// Only a pending match can still be confirmed or declined.
+// Only a pending match can still be accepted, declined or cancelled.
 export const canDecideMatch = (m) =>
   m.status === "pending_confirmation";
 

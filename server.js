@@ -10,11 +10,15 @@ import createSupplyRouter from "./supplyRoutes.js";
 import createDemandRouter from "./demandRoutes.js";
 import createAdminRouter from "./adminRoutes.js";
 import createMatchRouter from "./matchRoutes.js";
-import createFarmlinkRouter from "./FarmlinkRoutes.js";
+import createFarmlinkRouter from "./Farmlinkroutes.js";
 import createNoticeRouter from "./noticeRoutes.js";
 import createRoleApplicationRouter from "./roleApplicationRoutes.js";
 import createFarmerProfileRouter from "./farmerProfileRoutes.js";
 import createProfileRouter from "./profileRoutes.js";
+import createSettingsRouter from "./settingsRoutes.js";
+import createRequestRouter from "./requestRoutes.js";
+import createOrderPhotoRouter from "./orderPhotoRoutes.js";
+import { EmailOtpChallenge } from "./emailOtpChallengeModel.js";
 
 
 import createForgotRouter, {
@@ -27,6 +31,7 @@ import {
   requireRole,
   authLimiter,
   loginLimiter,
+  otpLimiter,
   sanitizeBody,
   signToken,
   setAuthCookie,
@@ -39,6 +44,24 @@ import {
   isDatabaseUnavailable,
   respondWithSafeError,
 } from "./safeErrors.js";
+
+import {
+  sendSignupOtpEmail,
+  sendLoginOtpEmail,
+  sendPasswordChangeOtpEmail,
+  checkEmailConfig,
+  describeMailError,
+  acquireSendLock,
+  releaseSendLock,
+  EMAIL_SEND_FAILED_BODY,
+} from "./emailService.js";
+
+// Warn at startup, but never print SMTP secrets. Requests will fail safely
+// until the local .env contains a valid Gmail SMTP configuration.
+{
+  const { ok, problems } = checkEmailConfig();
+  if (!ok) console.error("[email] OTP email is NOT configured:", problems.join("; "));
+}
 
 const app = express();
 
@@ -68,7 +91,19 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: "100kb" })); // small limit: this app never needs huge payloads
+// Small limit for the whole API. Routes that accept a photo get more room:
+//  - /api/supplies: product photo and reviews (a resized image, roughly 50-300 KB) -> 3 MB
+//  - /api/order-photos and /api/requests/matches: the buyer's / farmer's photo of the products -> 400 KB
+const jsonSmall = express.json({ limit: "100kb" });
+const jsonPhoto = express.json({ limit: "400kb" });
+const jsonSupply = express.json({ limit: "3mb" });
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/supplies")) return jsonSupply(req, res, next);
+  if (req.path.startsWith("/api/order-photos") || req.path.startsWith("/api/requests/matches")) {
+    return jsonPhoto(req, res, next);
+  }
+  return jsonSmall(req, res, next);
+});
 app.use(cookieParser());
 app.use(sanitizeBody); // strip NoSQL-injection operators from every request body
 
@@ -209,6 +244,9 @@ const userSchema = new mongoose.Schema(
       default: null,
     },
 
+    // Optional email OTP on every login when enabled in Account & Security.
+    twoFactorEnabled: { type: Boolean, default: false },
+
     // Bumped on password reset/change -> old session tokens stop working.
     tokenVersion: {
       type: Number,
@@ -281,16 +319,57 @@ function codeMatches(email, code, storedHash) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-// Development "email": the code is printed in the terminal running this server.
-// For production, replace this function with a real email sender.
-function announceSignupCode(email, code) {
-  console.log("");
-  console.log("==============================================");
-  console.log(" FarmLink signup verification code");
-  console.log(` Email : ${email}`);
-  console.log(` Code  : ${code}   (valid for 10 minutes)`);
-  console.log("==============================================");
-  console.log("");
+const PENDING_RESTORE_FIELDS = [
+  "name",
+  "passwordHash",
+  "codeHash",
+  "attempts",
+  "lastSentAt",
+  "consentAt",
+  "expiresAt",
+];
+
+// Restore the previous state only if this request's new hash is still stored.
+// This prevents a failed older request from overwriting a newer request.
+async function rollbackPendingSignup(email, newHash, previous) {
+  try {
+    if (previous) {
+      const restore = {};
+      for (const field of PENDING_RESTORE_FIELDS) {
+        if (previous[field] !== undefined) restore[field] = previous[field];
+      }
+      await PendingSignup.updateOne(
+        { email, codeHash: newHash },
+        { $set: restore }
+      );
+    } else {
+      await PendingSignup.deleteOne({ email, codeHash: newHash });
+    }
+  } catch (err) {
+    // Do not log codes or credential data.
+    console.error("Signup OTP rollback failed:", err?.name || "Error");
+  }
+}
+
+// Write the new hash/expiry first, then deliver the email. If delivery fails,
+// conditionally restore the exact prior state (or remove a newly-created row).
+async function persistAndDeliverSignupCode({ email, code, filter, newState, upsert }) {
+  const previous = await PendingSignup.findOneAndUpdate(
+    filter,
+    { $set: newState },
+    { upsert, returnDocument: "before", setDefaultsOnInsert: true }
+  ).lean();
+
+  if (!previous && !upsert) return { ok: false, conflict: true };
+
+  try {
+    await sendSignupOtpEmail(email, code, SIGNUP_CODE_TTL_MS / 60000);
+    return { ok: true, conflict: false };
+  } catch (mailErr) {
+    console.error("Signup OTP email failed:", describeMailError(mailErr));
+    await rollbackPendingSignup(email, newState.codeHash, previous);
+    return { ok: false, conflict: false };
+  }
 }
 
 /* ---------------- VALIDATION ---------------- */
@@ -320,6 +399,7 @@ function publicUser(user) {
     name: user.name,
     email: user.email,
     role: user.role,
+    twoFactorEnabled: user.twoFactorEnabled === true,
   };
 }
 
@@ -362,11 +442,11 @@ app.post("/api/auth/signup", authLimiter, async (req, res) => {
       });
     }
 
-    // Gmail validation
+    // Email validation
     if (!isValidEmail(email)) {
       return res.status(400).json({
         error:
-          "Email must be a valid Gmail address ending with @gmail.com.",
+          "Please enter a valid email address.",
       });
     }
 
@@ -392,17 +472,32 @@ app.post("/api/auth/signup", authLimiter, async (req, res) => {
       });
     }
 
+    // Fail before writing pending signup state if SMTP is not configured.
+    const emailCheck = checkEmailConfig();
+    if (!emailCheck.ok) {
+      console.error("[email] Cannot send signup OTP:", emailCheck.problems.join("; "));
+      return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+    }
+
     // Hash password now, so the plain password is never stored anywhere.
     const passwordHash = await bcrypt.hash(password, 10);
-
-    // Make a 6-digit code and keep ONLY its hash. Signing up again with the
-    // same email simply replaces the older pending sign-up.
     const code = newSignupCode();
     const now = new Date();
-    await PendingSignup.findOneAndUpdate(
-      { email: cleanEmail },
-      {
-        $set: {
+    const lockKey = `signup:${cleanEmail}`;
+    const lockToken = acquireSendLock(lockKey);
+    if (!lockToken) {
+      return res.status(429).json({
+        error: "Please wait a moment before requesting another code.",
+      });
+    }
+
+    try {
+      const result = await persistAndDeliverSignupCode({
+        email: cleanEmail,
+        code,
+        filter: { email: cleanEmail },
+        upsert: true,
+        newState: {
           name: name.trim(),
           passwordHash,
           codeHash: hashSignupCode(cleanEmail, code),
@@ -411,11 +506,16 @@ app.post("/api/auth/signup", authLimiter, async (req, res) => {
           consentAt: now,
           expiresAt: new Date(now.getTime() + SIGNUP_CODE_TTL_MS),
         },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-
-    announceSignupCode(cleanEmail, code);
+      });
+      if (!result.ok) {
+        if (result.conflict) {
+          return res.status(409).json({ error: "Your verification request changed. Please try again." });
+        }
+        return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+      }
+    } finally {
+      releaseSendLock(lockKey, lockToken);
+    }
 
     // No account and no session yet: the user must enter the code first.
     res.status(200).json({
@@ -462,7 +562,7 @@ app.post("/api/auth/signup/verify", authLimiter, async (req, res) => {
       const updated = await PendingSignup.findByIdAndUpdate(
         pending._id,
         { $inc: { attempts: 1 } },
-        { new: true }
+        { returnDocument: "after" }
       );
       const left = Math.max(0, SIGNUP_MAX_ATTEMPTS - (updated?.attempts || 0));
       if (left === 0) {
@@ -537,15 +637,45 @@ app.post("/api/auth/signup/resend", authLimiter, async (req, res) => {
       });
     }
 
+    const emailCheck = checkEmailConfig();
+    if (!emailCheck.ok) {
+      console.error("[email] Cannot send signup OTP:", emailCheck.problems.join("; "));
+      return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+    }
+
     const code = newSignupCode();
     const now = new Date();
-    pending.codeHash = hashSignupCode(cleanEmail, code);
-    pending.attempts = 0;
-    pending.lastSentAt = now;
-    pending.expiresAt = new Date(now.getTime() + SIGNUP_CODE_TTL_MS);
-    await pending.save();
+    const lockKey = `signup:${cleanEmail}`;
+    const lockToken = acquireSendLock(lockKey);
+    if (!lockToken) {
+      return res.status(429).json({
+        error: "Please wait a moment before requesting another code.",
+      });
+    }
 
-    announceSignupCode(cleanEmail, code);
+    try {
+      const result = await persistAndDeliverSignupCode({
+        email: cleanEmail,
+        code,
+        // Compare-and-swap: only replace the code observed before cooldown check.
+        filter: { email: cleanEmail, codeHash: pending.codeHash },
+        upsert: false,
+        newState: {
+          codeHash: hashSignupCode(cleanEmail, code),
+          attempts: 0,
+          lastSentAt: now,
+          expiresAt: new Date(now.getTime() + SIGNUP_CODE_TTL_MS),
+        },
+      });
+      if (result.conflict) {
+        return res.status(409).json({
+          error: "Your verification request changed. Please try again.",
+        });
+      }
+      if (!result.ok) return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+    } finally {
+      releaseSendLock(lockKey, lockToken);
+    }
 
     res.json({
       message: "A new code was sent.",
@@ -555,6 +685,139 @@ app.post("/api/auth/signup/resend", authLimiter, async (req, res) => {
     respondWithSafeError(res, err, "Signup resend error");
   }
 });
+
+const EMAIL_OTP_TTL_MS = 10 * 60 * 1000;
+const EMAIL_OTP_RESEND_MS = 30 * 1000;
+const EMAIL_OTP_MAX_ATTEMPTS = 5;
+
+function hashEmailOtpChallenge(challengeId) {
+  return crypto.createHash("sha256")
+    .update(`farmlink-email-otp-challenge:${challengeId}:${process.env.JWT_SECRET || ""}`)
+    .digest("hex");
+}
+
+function hashEmailOtpCode(userId, purpose, code) {
+  return crypto.createHash("sha256")
+    .update(`farmlink-email-otp:${userId}:${purpose}:${code}:${process.env.JWT_SECRET || ""}`)
+    .digest("hex");
+}
+
+function emailOtpCodeMatches(userId, purpose, code, storedHash) {
+  if (typeof code !== "string" || !/^\d{6}$/.test(code) || typeof storedHash !== "string") return false;
+  const a = Buffer.from(hashEmailOtpCode(userId, purpose, code));
+  const b = Buffer.from(storedHash);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function maskEmail(email) {
+  const [local = "", domain = ""] = String(email || "").split("@");
+  return `${local ? local.slice(0, 1) : "*"}${"*".repeat(Math.min(5, Math.max(3, local.length - 1)))}@${domain}`;
+}
+
+class OtpEmailDeliveryError extends Error {
+  constructor(original) {
+    super("Could not deliver the email verification code.");
+    this.name = "OtpEmailDeliveryError";
+    this.original = original;
+  }
+}
+
+async function createAndSendEmailOtp({ user, purpose, remember = false, newPasswordHash = null }) {
+  const challengeId = crypto.randomBytes(32).toString("hex");
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  const now = new Date();
+  const record = await EmailOtpChallenge.create({
+    user: user._id,
+    purpose,
+    challengeHash: hashEmailOtpChallenge(challengeId),
+    codeHash: hashEmailOtpCode(user._id, purpose, code),
+    newPasswordHash,
+    remember,
+    tokenVersion: user.tokenVersion || 0,
+    attempts: 0,
+    lastSentAt: now,
+    expiresAt: new Date(now.getTime() + EMAIL_OTP_TTL_MS),
+  });
+
+  try {
+    if (purpose === "login") {
+      await sendLoginOtpEmail(user.email, code, EMAIL_OTP_TTL_MS / 60000);
+    } else {
+      await sendPasswordChangeOtpEmail(user.email, code, EMAIL_OTP_TTL_MS / 60000);
+    }
+  } catch (mailErr) {
+    await EmailOtpChallenge.deleteOne({ _id: record._id, codeHash: record.codeHash }).catch(() => {});
+    throw new OtpEmailDeliveryError(mailErr);
+  }
+
+  // Invalidate older challenges only after the new email was accepted.
+  await EmailOtpChallenge.deleteMany({ user: user._id, purpose, _id: { $ne: record._id } }).catch((err) => {
+    console.error("Could not clear older email OTP challenges:", err?.name || "Error");
+  });
+
+  return {
+    challengeId,
+    email: maskEmail(user.email),
+    resendAfterSeconds: EMAIL_OTP_RESEND_MS / 1000,
+    expiresInSeconds: EMAIL_OTP_TTL_MS / 1000,
+  };
+}
+
+async function resendEmailOtpChallenge(record, purpose) {
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  const newCodeHash = hashEmailOtpCode(record.user, purpose, code);
+  const now = new Date();
+  const previous = {
+    codeHash: record.codeHash,
+    attempts: record.attempts,
+    lastSentAt: record.lastSentAt,
+    expiresAt: record.expiresAt,
+  };
+  const swapped = await EmailOtpChallenge.findOneAndUpdate(
+    { _id: record._id, codeHash: record.codeHash, purpose },
+    { $set: {
+      codeHash: newCodeHash,
+      attempts: 0,
+      lastSentAt: now,
+      expiresAt: new Date(now.getTime() + EMAIL_OTP_TTL_MS),
+    } },
+    { returnDocument: "after" }
+  ).lean();
+  if (!swapped) return { conflict: true };
+
+  const user = await User.findById(record.user);
+  if (!user) {
+    await EmailOtpChallenge.deleteOne({ _id: record._id, codeHash: newCodeHash }).catch(() => {});
+    return { expired: true };
+  }
+  try {
+    if (purpose === "login") await sendLoginOtpEmail(user.email, code, EMAIL_OTP_TTL_MS / 60000);
+    else await sendPasswordChangeOtpEmail(user.email, code, EMAIL_OTP_TTL_MS / 60000);
+  } catch (mailErr) {
+    const restored = await EmailOtpChallenge.updateOne(
+      { _id: record._id, codeHash: newCodeHash },
+      { $set: previous }
+    ).catch(() => ({ modifiedCount: 0 }));
+    if (!restored.modifiedCount) {
+      console.error("Email OTP resend rollback could not restore previous state.");
+    }
+    throw new OtpEmailDeliveryError(mailErr);
+  }
+  return { conflict: false, email: maskEmail(user.email), resendAfterSeconds: EMAIL_OTP_RESEND_MS / 1000 };
+}
+
+async function recordWrongEmailOtp(record) {
+  const updated = await EmailOtpChallenge.findOneAndUpdate(
+    { _id: record._id, attempts: { $lt: EMAIL_OTP_MAX_ATTEMPTS }, expiresAt: { $gt: new Date() } },
+    { $inc: { attempts: 1 } },
+    { returnDocument: "after" }
+  ).lean();
+  if (!updated || updated.attempts >= EMAIL_OTP_MAX_ATTEMPTS) {
+    await EmailOtpChallenge.deleteOne({ _id: record._id }).catch(() => {});
+    return { blocked: true };
+  }
+  return { blocked: false, attemptsLeft: EMAIL_OTP_MAX_ATTEMPTS - updated.attempts };
+}
 
 /* ---------------- LOGIN ---------------- */
 
@@ -584,7 +847,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
     if (!isValidEmail(email)) {
       return res.status(400).json({
         error:
-          "Email must be a valid Gmail address ending with @gmail.com.",
+          "Please enter a valid email address.",
       });
     }
 
@@ -624,7 +887,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
       const updated = await User.findByIdAndUpdate(
         user._id,
         { $inc: { failedLoginAttempts: 1 } },
-        { new: true }
+        { returnDocument: "after" }
       );
       if (updated && updated.failedLoginAttempts >= MAX_FAILED_ATTEMPTS) {
         const nextCount = (user.lockCount || 0) + 1;
@@ -656,6 +919,39 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
       return res.status(401).json(genericError);
     }
 
+    // When email-based 2FA is enabled, do not create a session until its OTP is verified.
+    if (user.twoFactorEnabled === true) {
+      const config = checkEmailConfig();
+      if (!config.ok) {
+        console.error("[email] Cannot send login OTP:", config.problems.join("; "));
+        return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+      }
+      const lockKey = `login-otp:${String(user._id)}`;
+      const lockToken = acquireSendLock(lockKey);
+      if (!lockToken) {
+        return res.status(429).json({ error: "A login code is already being sent. Please wait a moment." });
+      }
+      try {
+        let challenge;
+        try {
+          challenge = await createAndSendEmailOtp({ user, purpose: "login", remember });
+        } catch (err) {
+          if (err instanceof OtpEmailDeliveryError) {
+            console.error("Login OTP email failed:", describeMailError(err.original));
+            return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+          }
+          throw err;
+        }
+        return res.status(200).json({
+          message: "Login verification code sent.",
+          requiresTwoFactor: true,
+          ...challenge,
+        });
+      } finally {
+        releaseSendLock(lockKey, lockToken);
+      }
+    }
+
     // Successful login — reset lockout counters.
     if (user.failedLoginAttempts || user.lockUntil || user.lockCount) {
       await User.findByIdAndUpdate(user._id, {
@@ -677,6 +973,100 @@ app.post("/api/auth/login", loginLimiter, async (req, res) => {
 
   } catch (err) {
     respondWithSafeError(res, err, "Login error");
+  }
+});
+
+/* ---------------- LOGIN TWO-FACTOR OTP ---------------- */
+
+app.post("/api/auth/login/verify-otp", otpLimiter, async (req, res) => {
+  try {
+    const { challengeId, code } = req.body || {};
+    if (typeof challengeId !== "string" || !/^[a-f0-9]{64}$/i.test(challengeId) || typeof code !== "string" || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ error: "Enter the 6-digit verification code." });
+    }
+    const challengeHash = hashEmailOtpChallenge(challengeId);
+    const challenge = await EmailOtpChallenge.findOne({ challengeHash, purpose: "login" }).lean();
+    if (!challenge || challenge.expiresAt <= new Date()) {
+      if (challenge) await EmailOtpChallenge.deleteOne({ _id: challenge._id });
+      return res.status(400).json({ error: "This login code has expired. Please log in again." });
+    }
+    if (challenge.attempts >= EMAIL_OTP_MAX_ATTEMPTS) {
+      await EmailOtpChallenge.deleteOne({ _id: challenge._id });
+      return res.status(429).json({ error: "Too many incorrect codes. Please log in again." });
+    }
+
+    const user = await User.findById(challenge.user);
+    if (!user || user.twoFactorEnabled !== true || (user.tokenVersion || 0) !== (challenge.tokenVersion || 0)) {
+      await EmailOtpChallenge.deleteOne({ _id: challenge._id }).catch(() => {});
+      return res.status(400).json({ error: "This login verification is no longer valid. Please log in again." });
+    }
+    if (!emailOtpCodeMatches(user._id, "login", code, challenge.codeHash)) {
+      const attempt = await recordWrongEmailOtp(challenge);
+      if (attempt.blocked) return res.status(429).json({ error: "Too many incorrect codes. Please log in again." });
+      return res.status(400).json({ error: `Incorrect code. ${attempt.attemptsLeft} ${attempt.attemptsLeft === 1 ? "try" : "tries"} left.` });
+    }
+
+    const consumed = await EmailOtpChallenge.findOneAndDelete({
+      _id: challenge._id,
+      codeHash: challenge.codeHash,
+      attempts: challenge.attempts,
+      expiresAt: { $gt: new Date() },
+    }).lean();
+    if (!consumed) return res.status(409).json({ error: "This code was already used or changed. Please try again." });
+
+    user.failedLoginAttempts = 0;
+    user.lockCount = 0;
+    user.lockUntil = null;
+    await user.save();
+    setAuthCookie(res, signToken(user, challenge.remember === true), challenge.remember === true);
+    return res.status(200).json({ message: "Login successful.", user: publicUser(user) });
+  } catch (err) {
+    respondWithSafeError(res, err, "Login OTP verification error");
+  }
+});
+
+app.post("/api/auth/login/resend-otp", otpLimiter, async (req, res) => {
+  try {
+    const { challengeId } = req.body || {};
+    if (typeof challengeId !== "string" || !/^[a-f0-9]{64}$/i.test(challengeId)) {
+      return res.status(400).json({ error: "Please start the login process again." });
+    }
+    const challengeHash = hashEmailOtpChallenge(challengeId);
+    const challenge = await EmailOtpChallenge.findOne({ challengeHash, purpose: "login" });
+    if (!challenge || challenge.expiresAt <= new Date()) {
+      if (challenge) await EmailOtpChallenge.deleteOne({ _id: challenge._id });
+      return res.status(400).json({ error: "This login code has expired. Please log in again." });
+    }
+    const user = await User.findById(challenge.user);
+    if (!user || user.twoFactorEnabled !== true || (user.tokenVersion || 0) !== (challenge.tokenVersion || 0)) {
+      await EmailOtpChallenge.deleteOne({ _id: challenge._id }).catch(() => {});
+      return res.status(400).json({ error: "This login verification is no longer valid. Please log in again." });
+    }
+    const waitMs = EMAIL_OTP_RESEND_MS - (Date.now() - new Date(challenge.lastSentAt).getTime());
+    if (waitMs > 0) {
+      return res.status(429).json({ error: "Please wait before requesting another code.", retryAfterSeconds: Math.ceil(waitMs / 1000) });
+    }
+    const lockKey = `login-otp-resend:${String(challenge.user)}`;
+    const lockToken = acquireSendLock(lockKey);
+    if (!lockToken) return res.status(429).json({ error: "A login code is already being sent. Please wait." });
+    try {
+      const config = checkEmailConfig();
+      if (!config.ok) return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+      const result = await resendEmailOtpChallenge(challenge.toObject(), "login");
+      if (result.conflict) return res.status(409).json({ error: "Your login code changed. Please try again." });
+      if (result.expired) return res.status(400).json({ error: "Please log in again." });
+      return res.json({ message: "A new login code was sent.", email: result.email, resendAfterSeconds: result.resendAfterSeconds });
+    } catch (err) {
+      if (err instanceof OtpEmailDeliveryError) {
+        console.error("Login OTP resend failed:", describeMailError(err.original));
+        return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+      }
+      throw err;
+    } finally {
+      releaseSendLock(lockKey, lockToken);
+    }
+  } catch (err) {
+    respondWithSafeError(res, err, "Login OTP resend error");
   }
 });
 
@@ -702,9 +1092,9 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ message: "Logged out." });
 });
 
-/* ---------------- CHANGE PASSWORD (logged-in users) ---------------- */
-// Used by the Change Password forms on the Profile pages.
+/* ---------------- CHANGE PASSWORD (email OTP confirmation) ---------------- */
 
+// Step 1: verify the current password, hash the proposed new password, and email an OTP.
 app.post("/api/auth/change-password", authenticate, authLimiter, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body || {};
@@ -716,20 +1106,144 @@ app.post("/api/auth/change-password", authenticate, authLimiter, async (req, res
 
     const user = await User.findById(req.user.id);
     if (!user) return res.status(401).json({ error: "Session no longer valid." });
-
     if (!(await bcrypt.compare(currentPassword, user.password))) {
       return res.status(400).json({ error: "Your current password is incorrect." });
     }
+    if (await bcrypt.compare(newPassword, user.password)) {
+      return res.status(400).json({ error: "Your new password must be different from the current one." });
+    }
 
-    user.password = await bcrypt.hash(newPassword, 10);
-    user.tokenVersion = (user.tokenVersion || 0) + 1; // logs out other devices
-    await user.save();
-
-    // Keep THIS device logged in with a fresh token.
-    setAuthCookie(res, signToken(user));
-    res.json({ message: "Password changed." });
+    const config = checkEmailConfig();
+    if (!config.ok) {
+      console.error("[email] Cannot send password-change OTP:", config.problems.join("; "));
+      return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+    }
+    const lockKey = `change-password-otp:${String(user._id)}`;
+    const lockToken = acquireSendLock(lockKey);
+    if (!lockToken) return res.status(429).json({ error: "A password-change code is already being sent. Please wait." });
+    try {
+      const newPasswordHash = await bcrypt.hash(newPassword, 10);
+      let challenge;
+      try {
+        challenge = await createAndSendEmailOtp({ user, purpose: "change_password", newPasswordHash });
+      } catch (err) {
+        if (err instanceof OtpEmailDeliveryError) {
+          console.error("Password-change OTP email failed:", describeMailError(err.original));
+          return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+        }
+        throw err;
+      }
+      return res.status(200).json({ message: "Password-change verification code sent.", ...challenge });
+    } finally {
+      releaseSendLock(lockKey, lockToken);
+    }
   } catch (err) {
-    respondWithSafeError(res, err, "Change password error");
+    respondWithSafeError(res, err, "Change password request error");
+  }
+});
+
+// Step 2: the new password is not saved until the email OTP is correct.
+app.post("/api/auth/change-password/verify-otp", authenticate, otpLimiter, async (req, res) => {
+  try {
+    const { challengeId, code } = req.body || {};
+    if (typeof challengeId !== "string" || !/^[a-f0-9]{64}$/i.test(challengeId) || typeof code !== "string" || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ error: "Enter the 6-digit verification code." });
+    }
+    const challengeHash = hashEmailOtpChallenge(challengeId);
+    const challenge = await EmailOtpChallenge.findOne({
+      challengeHash,
+      purpose: "change_password",
+      user: req.user.id,
+    }).lean();
+    if (!challenge || challenge.expiresAt <= new Date()) {
+      if (challenge) await EmailOtpChallenge.deleteOne({ _id: challenge._id });
+      return res.status(400).json({ error: "This password-change code has expired. Please start again." });
+    }
+    if (challenge.attempts >= EMAIL_OTP_MAX_ATTEMPTS) {
+      await EmailOtpChallenge.deleteOne({ _id: challenge._id });
+      return res.status(429).json({ error: "Too many incorrect codes. Please request a new code." });
+    }
+    const user = await User.findById(req.user.id);
+    if (!user || (user.tokenVersion || 0) !== (challenge.tokenVersion || 0)) {
+      await EmailOtpChallenge.deleteOne({ _id: challenge._id }).catch(() => {});
+      return res.status(401).json({ error: "Your session changed. Please start the password-change process again." });
+    }
+    if (!challenge.newPasswordHash) {
+      await EmailOtpChallenge.deleteOne({ _id: challenge._id }).catch(() => {});
+      return res.status(400).json({ error: "Please start the password-change process again." });
+    }
+    if (!emailOtpCodeMatches(user._id, "change_password", code, challenge.codeHash)) {
+      const attempt = await recordWrongEmailOtp(challenge);
+      if (attempt.blocked) return res.status(429).json({ error: "Too many incorrect codes. Please request a new code." });
+      return res.status(400).json({ error: `Incorrect code. ${attempt.attemptsLeft} ${attempt.attemptsLeft === 1 ? "try" : "tries"} left.` });
+    }
+
+    const consumed = await EmailOtpChallenge.findOneAndDelete({
+      _id: challenge._id,
+      codeHash: challenge.codeHash,
+      attempts: challenge.attempts,
+      expiresAt: { $gt: new Date() },
+    }).lean();
+    if (!consumed) return res.status(409).json({ error: "This code was already used or changed. Please try again." });
+
+    user.password = challenge.newPasswordHash;
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    user.failedLoginAttempts = 0;
+    user.lockUntil = null;
+    user.lockCount = 0;
+    await user.save();
+    await EmailOtpChallenge.deleteMany({ user: user._id }).catch(() => {});
+    // Keep this device signed in with a fresh token; all other sessions are invalidated by tokenVersion.
+    setAuthCookie(res, signToken(user));
+    return res.json({ message: "Password changed successfully." });
+  } catch (err) {
+    respondWithSafeError(res, err, "Change password verification error");
+  }
+});
+
+app.post("/api/auth/change-password/resend-otp", authenticate, otpLimiter, async (req, res) => {
+  try {
+    const { challengeId } = req.body || {};
+    if (typeof challengeId !== "string" || !/^[a-f0-9]{64}$/i.test(challengeId)) {
+      return res.status(400).json({ error: "Please start the password-change process again." });
+    }
+    const challenge = await EmailOtpChallenge.findOne({
+      challengeHash: hashEmailOtpChallenge(challengeId),
+      purpose: "change_password",
+      user: req.user.id,
+    });
+    if (!challenge || challenge.expiresAt <= new Date()) {
+      if (challenge) await EmailOtpChallenge.deleteOne({ _id: challenge._id });
+      return res.status(400).json({ error: "This code has expired. Please start the password-change process again." });
+    }
+    const user = await User.findById(req.user.id);
+    if (!user || (user.tokenVersion || 0) !== (challenge.tokenVersion || 0)) {
+      await EmailOtpChallenge.deleteOne({ _id: challenge._id }).catch(() => {});
+      return res.status(401).json({ error: "Your session changed. Please start again." });
+    }
+    const waitMs = EMAIL_OTP_RESEND_MS - (Date.now() - new Date(challenge.lastSentAt).getTime());
+    if (waitMs > 0) {
+      return res.status(429).json({ error: "Please wait before requesting another code.", retryAfterSeconds: Math.ceil(waitMs / 1000) });
+    }
+    const lockKey = `change-password-otp-resend:${String(user._id)}`;
+    const lockToken = acquireSendLock(lockKey);
+    if (!lockToken) return res.status(429).json({ error: "A code is already being sent. Please wait." });
+    try {
+      const result = await resendEmailOtpChallenge(challenge.toObject(), "change_password");
+      if (result.conflict) return res.status(409).json({ error: "Your code changed. Please try again." });
+      if (result.expired) return res.status(400).json({ error: "Please start again." });
+      return res.json({ message: "A new password-change code was sent.", email: result.email, resendAfterSeconds: result.resendAfterSeconds });
+    } catch (err) {
+      if (err instanceof OtpEmailDeliveryError) {
+        console.error("Password-change OTP resend failed:", describeMailError(err.original));
+        return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+      }
+      throw err;
+    } finally {
+      releaseSendLock(lockKey, lockToken);
+    }
+  } catch (err) {
+    respondWithSafeError(res, err, "Password-change OTP resend error");
   }
 });
 
@@ -752,6 +1266,11 @@ app.use("/api/notifications", createNoticeRouter());
 app.use("/api/role-applications", createRoleApplicationRouter({ User }));
 app.use("/api/farmers", createFarmerProfileRouter());
 app.use("/api/profile", createProfileRouter({ User })); // profile page data (MongoDB "profiles")
+app.use("/api/settings", createSettingsRouter({ User })); // Settings page (all roles) — must stay BELOW "const User" and ABOVE the 404 handler
+app.use("/api/requests", createRequestRouter()); // Pre-orders: buyer sends, farmer accepts or declines — must stay ABOVE the 404 handler
+console.log("Requests route ready: /api/requests");
+app.use("/api/order-photos", createOrderPhotoRouter()); // Buyer's photo of the products on an order (saved in MongoDB) — must stay ABOVE the 404 handler
+console.log("Order photos route ready: /api/order-photos");
 
 /* ---------------- 404 HANDLER ---------------- */
 
@@ -788,6 +1307,17 @@ app.use((err, req, res, next) => {
 
 /* ---------------- MONGODB CONNECTION ---------------- */
 
+// Collections used by orders, reviews, photos and requirement delivery. Photos and
+// reviews are saved in these collections, so they stay after logging out and in.
+const FEATURE_MODELS = [
+  "PreOrderRequest",
+  "MatchOrder",
+  "MatchPhoto",
+  "ProductReview",
+  "DemandDelivery",
+  "OrderPhoto",
+];
+
 mongoose
   .connect(process.env.MONGO_URI)
   .then(async () => {
@@ -801,6 +1331,30 @@ mongoose
     );
     if (fixed.modifiedCount) {
       console.log(`Set role "user" on ${fixed.modifiedCount} account(s) that had no role`);
+    }
+
+    // Make sure the feature collections have their indexes (for example "one photo per
+    // order" and "one review per order"). This only adds missing indexes: it never
+    // deletes data.
+    for (const name of FEATURE_MODELS) {
+      try {
+        await mongoose.models[name]?.createIndexes();
+      } catch (err) {
+        console.error(`Index setup problem for ${name}:`, err?.message || err);
+      }
+    }
+
+    // Old accepted orders that have no step yet start at "Accepted".
+    try {
+      const filled = await mongoose.models.PreOrderRequest?.updateMany(
+        { status: "confirmed", $or: [{ orderStatus: { $exists: false } }, { orderStatus: "" }] },
+        { $set: { orderStatus: "accepted" } }
+      );
+      if (filled?.modifiedCount) {
+        console.log(`Set the "accepted" step on ${filled.modifiedCount} older order(s)`);
+      }
+    } catch (err) {
+      console.error("Order step update problem:", err?.message || err);
     }
 
     const PORT = process.env.PORT || 5000;

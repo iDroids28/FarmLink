@@ -1,22 +1,22 @@
-import GlassCard from "../components/GlassCard.jsx";
-import { PageHeader } from "../components/DemoBits.jsx";
+import { UserCheck, Link2, Megaphone } from "lucide-react";
+import SettingsPage from "../components/SettingsPage.jsx";
 
-export default function AdminSettings({ user }) {
-  return (
-    <div className="space-y-6">
-      <PageHeader title="Settings" subtitle="Your admin account." />
-      <GlassCard>
-        <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div>
-            <dt className="text-[12px] text-gray-500">Name</dt>
-            <dd className="text-[13.5px] font-medium text-[#16301F]">{user?.name || "—"}</dd>
-          </div>
-          <div>
-            <dt className="text-[12px] text-gray-500">Email</dt>
-            <dd className="text-[13.5px] font-medium text-[#16301F]">{user?.email || "—"}</dd>
-          </div>
-        </dl>
-      </GlassCard>
-    </div>
-  );
+/* ADMIN settings. Admins have no Privacy card. Edit this file to change only the admin Settings page. */
+const CONFIG = {
+  roleLabel: "Admin",
+  privacy: false,
+  notifications: [
+    { key: "applications", icon: UserCheck, label: "New Applications", desc: "Get notified when a farmer or business submits an application." },
+    { key: "matches", icon: Link2, label: "Match Activity", desc: "Get notified about new matches between farmers and buyers." },
+    { key: "system", icon: Megaphone, label: "System Announcements", desc: "Receive important news and system updates." },
+  ],
+  faq: [
+    { q: "How do I review an application?", a: "Open Farmers or Buyers from the menu, pick a pending application and approve or reject it. The user's role updates right away." },
+    { q: "How do I change my password?", a: "Go to Account & Security above and click Change Password. Your other devices will be logged out for safety." },
+    { q: "I forgot my password.", a: "Log out, choose Forgot Password on the login page and follow the steps to get a code and set a new password." },
+  ],
+};
+
+export default function AdminSettings({ user, onRefreshUser, onLogout }) {
+  return <SettingsPage config={CONFIG} user={user} onRefreshUser={onRefreshUser} onLogout={onLogout} />;
 }

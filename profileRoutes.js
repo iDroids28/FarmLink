@@ -131,13 +131,6 @@ export default function createProfileRouter({ User }) {
       const set = {};
 
       // --- shared (all roles) ---
-      const phone = str(b.phone, 20);
-      if (phone !== undefined) {
-        if (phone && !/^[0-9+\-\s()]{7,20}$/.test(phone)) {
-          return res.status(400).json({ error: "Enter a valid contact number." });
-        }
-        set.phone = phone;
-      }
       const address = str(b.address, 200);
       if (address !== undefined) set.address = address;
 

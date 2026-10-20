@@ -3,9 +3,9 @@ import { Match } from "./matchModel.js";
 import { authenticate, requireRole, writeLimiter } from "./security.js";
 import { respondWithSafeError } from "./safeErrors.js";
 import { isValidId, round2 } from "./farmValidation.js";
-import { confirmMatch, declineMatch } from "./matchingEngine.js";
+import { confirmMatch, declineMatch, cancelMatchByBuyer } from "./matchingEngine.js";
 import { businessNamesFor, businessProfileFor } from "./businessProfile.js";
-import { Demand } from "./farmModels.js";
+import { Demand, Supply } from "./farmModels.js";
 import { breakdownFor, COUNTED_MATCH } from "./demandBreakdown.js";
 
 const NOT_FOUND = { error: "Match not found." };
@@ -59,6 +59,51 @@ export default function createMatchRouter() {
     }
   });
 
+
+  // Farmer OR buyer: one of THEIR OWN matches, for the Notifications pop-up.
+  // The lookup filters by the caller's side, so someone else's match is a 404.
+  // Contains no names, emails or ids of the other person.
+  router.get("/:id/summary", requireRole("farmer", "buyer"), async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
+      const side = req.user.role === "farmer" ? "farmer" : "buyer";
+
+      const m = await Match.findOne({ _id: req.params.id, [side]: req.user.id })
+        .select("demand supply product unit quantity status location neededDate availabilityDate")
+        .lean();
+      if (!m) return res.status(404).json(NOT_FOUND);
+
+      const [demand, breakdowns, supply] = await Promise.all([
+        Demand.findById(m.demand).select("quantity").lean(),
+        breakdownFor([m.demand]),
+        Supply.findById(m.supply).select("supplyType").lean(),
+      ]);
+      const b = breakdowns.get(String(m.demand)) || { pending: 0, confirmed: 0 };
+      const total = demand ? demand.quantity : m.quantity;
+      const covered = Math.min(round2(b.confirmed + b.pending), total);
+
+      res.json({
+        summary: {
+          id: String(m._id),
+          status: m.status,
+          product: m.product,
+          quantity: m.quantity,
+          unit: m.unit,
+          location: m.location,
+          neededDate: m.neededDate,
+          availabilityDate: m.availabilityDate,
+          supplyType: supply?.supplyType || "onhand",
+          requestedQuantity: total,
+          confirmedQuantity: b.confirmed,
+          pendingQuantity: b.pending,
+          // Still needed after this match (pending + confirmed are already counted).
+          remainingQuantity: Math.max(0, round2(total - covered)),
+        },
+      });
+    } catch (err) {
+      respondWithSafeError(res, err, "Load match summary error");
+    }
+  });
 
   // Farmer-only details for the "View Details" modal, in one call.
   // Ownership: the lookup filters by farmer, so someone else's match is a 404.
@@ -159,6 +204,21 @@ export default function createMatchRouter() {
     decide(req, res, confirmMatch, "Confirm match error"));
   router.post("/:id/decline", writeLimiter, requireRole("farmer"), (req, res) =>
     decide(req, res, declineMatch, "Decline match error"));
+
+  // Buyer: cancel one match that is still waiting for the farmer.
+  router.post("/:id/cancel", writeLimiter, requireRole("buyer"), async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
+      const m = await cancelMatchByBuyer(req.params.id, req.user.id);
+      if (m) return res.json({ match: buyerView(m) });
+
+      const own = await Match.exists({ _id: req.params.id, buyer: req.user.id });
+      if (!own) return res.status(404).json(NOT_FOUND);
+      res.status(409).json({ error: "This match can no longer be cancelled." });
+    } catch (err) {
+      respondWithSafeError(res, err, "Cancel match error");
+    }
+  });
 
   return router;
 }

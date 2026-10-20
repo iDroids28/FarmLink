@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Camera, Eye, EyeOff, Lock, Pencil, Save, User, X } from "lucide-react";
 import GlassCard from "./GlassCard.jsx";
-import { API_URL, safeFetchJson } from "../AuthShared";
+import { API_URL, safeFetchJson, getPasswordError, OtpField, OTP_SEND_OPTIONS } from "../AuthShared";
 
 // API_URL points at the auth routes (".../api/auth"); strip that to reach /api/profile.
 // If your API_URL is different, change this line.
@@ -360,27 +360,103 @@ export function PasswordForm({ onDone }) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [challengeId, setChallengeId] = useState("");
+  const [emailForOtp, setEmailForOtp] = useState("");
+  const [otp, setOtp] = useState("");
+  const [resendIn, setResendIn] = useState(0);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState({ type: "", text: "" });
 
+  useEffect(() => {
+    if (resendIn <= 0) return undefined;
+    const timer = window.setTimeout(() => setResendIn((n) => n - 1), 1000);
+    return () => window.clearTimeout(timer);
+  }, [resendIn]);
+
   async function submit(e) {
     e.preventDefault();
-    if (next !== confirm) return setMsg({ type: "error", text: "The new passwords do not match." });
-    setBusy(true);
+    if (busy) return;
     setMsg({ type: "", text: "" });
+
+    if (challengeId) {
+      if (!/^\d{6}$/.test(otp)) {
+        setMsg({ type: "error", text: "Enter the 6-digit code from your email." });
+        return;
+      }
+      setBusy(true);
+      try {
+        await safeFetchJson(`${API_URL}/change-password/verify-otp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ challengeId, code: otp }),
+        });
+        setCurrent(""); setNext(""); setConfirm(""); setOtp(""); setChallengeId("");
+        setMsg({ type: "ok", text: "Password updated successfully." });
+        onDone?.();
+      } catch (err) {
+        setMsg({ type: "error", text: err?.message || "Could not verify the email code." });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    if (!current || !next || !confirm) {
+      setMsg({ type: "error", text: "Please fill out all fields." });
+      return;
+    }
+    const passwordError = getPasswordError(next);
+    if (passwordError) {
+      setMsg({ type: "error", text: passwordError });
+      return;
+    }
+    if (next !== confirm) {
+      setMsg({ type: "error", text: "The new passwords do not match." });
+      return;
+    }
+    if (next === current) {
+      setMsg({ type: "error", text: "Your new password must be different from the current one." });
+      return;
+    }
+
+    setBusy(true);
     try {
-      await safeFetchJson(`${API_URL}/change-password`, {
+      const data = await safeFetchJson(`${API_URL}/change-password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ currentPassword: current, newPassword: next }),
+        ...OTP_SEND_OPTIONS,
       });
-      setCurrent("");
-      setNext("");
-      setConfirm("");
-      setMsg({ type: "ok", text: "Password updated." });
-      onDone?.();
+      setChallengeId(data.challengeId);
+      setEmailForOtp(data.email || "your registered email");
+      setResendIn(Number(data.resendAfterSeconds) || 30);
+      setOtp("");
+      setMsg({ type: "ok", text: `Verification code sent to ${data.email || "your registered email"}.` });
     } catch (err) {
-      setMsg({ type: "error", text: err?.message || "Could not update your password." });
+      setMsg({ type: "error", text: err?.message || "Could not send the verification code." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resendOtp() {
+    if (!challengeId || busy || resendIn > 0) return;
+    setBusy(true);
+    setMsg({ type: "", text: "" });
+    try {
+      const data = await safeFetchJson(`${API_URL}/change-password/resend-otp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ challengeId }),
+        ...OTP_SEND_OPTIONS,
+      });
+      setEmailForOtp(data.email || emailForOtp);
+      setResendIn(Number(data.resendAfterSeconds) || 30);
+      setOtp("");
+      setMsg({ type: "ok", text: "A new verification code was sent." });
+    } catch (err) {
+      if (err?.retryAfter) setResendIn(err.retryAfter);
+      setMsg({ type: "error", text: err?.message || "Could not resend the verification code." });
     } finally {
       setBusy(false);
     }
@@ -388,19 +464,33 @@ export function PasswordForm({ onDone }) {
 
   return (
     <form onSubmit={submit} className="space-y-3">
-      <PasswordInput id="pw-current" label="Current Password" value={current} onChange={setCurrent} placeholder="Enter current password" autoComplete="current-password" />
-      <PasswordInput id="pw-new" label="New Password" value={next} onChange={setNext} placeholder="Enter new password" autoComplete="new-password" />
-      <PasswordInput id="pw-confirm" label="Confirm New Password" value={confirm} onChange={setConfirm} placeholder="Confirm new password" autoComplete="new-password" />
+      {challengeId ? (
+        <>
+          <p className="text-[13px] leading-5 text-gray-600">
+            Enter the 6-digit code sent to <b className="text-[#16301F]">{emailForOtp}</b> to confirm this password change. The code expires in 10 minutes.
+          </p>
+          <OtpField value={otp} onChange={setOtp} />
+          <button type="button" onClick={resendOtp} disabled={busy || resendIn > 0} className="w-full text-[12.5px] font-semibold text-[#2E7D32] disabled:text-gray-400">
+            {busy ? "Sending..." : resendIn > 0 ? `Resend code in ${resendIn}s` : "Resend code"}
+          </button>
+        </>
+      ) : (
+        <>
+          <PasswordInput id="pw-current" label="Current Password" value={current} onChange={setCurrent} placeholder="Enter current password" autoComplete="current-password" />
+          <PasswordInput id="pw-new" label="New Password" value={next} onChange={setNext} placeholder="Enter new password" autoComplete="new-password" />
+          <PasswordInput id="pw-confirm" label="Confirm New Password" value={confirm} onChange={setConfirm} placeholder="Confirm new password" autoComplete="new-password" />
+        </>
+      )}
       {msg.text && (
         <p className={"text-[13px] " + (msg.type === "ok" ? "text-[#2E7D32]" : "text-red-600")}>{msg.text}</p>
       )}
       <button
         type="submit"
-        disabled={busy || !current || !next || !confirm}
+        disabled={busy || (challengeId ? !otp : (!current || !next || !confirm))}
         className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#0F5A43] py-2.5 text-[14px] font-semibold text-white transition hover:brightness-110 disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4CAF50] focus-visible:ring-offset-2"
       >
         <Lock size={15} />
-        {busy ? "Updating…" : "Update Password"}
+        {busy ? (challengeId ? "Verifying…" : "Sending code…") : (challengeId ? "Verify Code & Update Password" : "Send Verification Code")}
       </button>
     </form>
   );

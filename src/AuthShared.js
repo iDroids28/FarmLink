@@ -258,27 +258,28 @@ export function PasswordRules({ password }) {
 
 /* ---------------- VALIDATION HELPERS ---------------- */
 
-// Gmail only: username@gmail.com — one "@", no spaces, and "@gmail.com" in lowercase.
-const EMAIL_REGEX = /^[^\s@]+@gmail\.com$/;
+// Accept common email addresses across providers while rejecting malformed domain
+// labels, whitespace, multiple @ signs, and unsafe header characters.
+// Keep this aligned with EMAIL_ADDRESS_RE in emailService.js.
+const EMAIL_REGEX =
+  /^(?=[^@]{1,64}@)[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$/;
 
 export function isValidEmail(value) {
-  return EMAIL_REGEX.test((value || "").trim());
+  if (typeof value !== "string") return false;
+  const v = value.trim();
+  return v.length <= 254 && EMAIL_REGEX.test(v);
 }
 
 // Returns a specific, human-readable reason the email is invalid, or null if it's fine.
 export function getEmailError(value) {
-  const v = (value || "").trim();
+  const v = (typeof value === "string" ? value : "").trim();
   if (!v) return "Please enter your email address.";
   if (/\s/.test(v)) return "Email address cannot contain spaces.";
-  if (!v.includes("@")) return "Email address must include '@' (e.g. username@gmail.com).";
-  if ((v.match(/@/g) || []).length > 1) return "Email address can only have one '@'.";
-  if (v.toLowerCase().endsWith("@gmail.com") && !v.endsWith("@gmail.com")) {
-    return "Use lowercase letters for the domain: username@gmail.com.";
+  if (!v.includes("@")) return "Email address must include '@' (e.g. name@phinmaed.com).";
+  if ((v.match(/@/g) || []).length !== 1) return "Please enter a valid email address.";
+  if (!isValidEmail(v)) {
+    return "Please enter a valid email address (e.g. name@phinmaed.com).";
   }
-  if (!v.endsWith("@gmail.com")) {
-    return "Email must end with @gmail.com (e.g. username@gmail.com).";
-  }
-  if (!EMAIL_REGEX.test(v)) return "Please enter your username before @gmail.com.";
   return null;
 }
 
@@ -287,10 +288,10 @@ export function sanitizeName(value) {
   return (value || "").replace(/[^a-zA-Z\s'-]/g, "");
 }
 
-// Email field: only letters, numbers, "." and "@" can be typed.
-// Symbols like # $ ! ^ & * % ( ) are blocked, so they never appear in the box.
+// Permit common characters used in email addresses and in different domains.
+// Spaces are removed while typing; the validator checks the overall structure.
 export function sanitizeEmail(value) {
-  return (value || "").replace(/[^A-Za-z0-9.@]/g, "");
+  return (value || "").replace(/\s/g, "");
 }
 
 // Strong password rules (used for Sign Up and Reset Password).
@@ -347,11 +348,12 @@ export function sanitizePassword(value) {
 // generic message by getUserMessage() below.
 // replace the whole UserFacingError class with
 export class UserFacingError extends Error {
-  constructor(message, status, retryAfter = 0) {
+  constructor(message, status, retryAfter = 0, code = "") {
     super(message);
     this.name = "UserFacingError";
     this.status = status;
     this.retryAfter = retryAfter; // seconds, used for lockouts / rate limits
+    this.code = code; // safe machine-readable server code
   }
 }
 
@@ -361,6 +363,16 @@ export const SAFE_MESSAGES = {
   generic: "Something went wrong. Please try again.",
   unprocessed: "We couldn't process your request. Please try again.",
   tooMany: "Too many attempts. Please wait a few minutes and try again.",
+  otpEmailFailed: "We couldn't send the verification email right now. Please try again in a moment.",
+  otpTimeout: "Sending the email took too long. Check your inbox and spam folder before trying again.",
+};
+
+// OTP-sending requests get extra time because the backend waits for SMTP.
+// Other requests keep their existing 10-second timeout.
+export const DEFAULT_TIMEOUT_MS = 10000;
+export const OTP_SEND_OPTIONS = {
+  timeoutMs: 45000,
+  timeoutMessage: SAFE_MESSAGES.otpTimeout,
 };
 
 // Defense in depth: even if the server ever sent something technical by mistake,
@@ -390,28 +402,45 @@ function toSafeMessage(status, message) {
 // Use this in every catch block that shows an error on screen.
 export function getUserMessage(err) {
   if (err instanceof UserFacingError) return err.message;
-  // Unexpected error: keep the details in the browser console for developers
-  // (development mode only) and show a generic message to the user.
+  // Unexpected error: keep details in the browser console only in development.
   if (import.meta.env && import.meta.env.DEV) console.error(err);
   return SAFE_MESSAGES.generic;
 }
 
-// Wraps fetch so users only ever see simple messages. Real technical details
-// stay in the server logs. A request that takes longer than 10 seconds is
-// treated like "can't connect" so the screen never hangs forever.
+// Use this in catch blocks for requests that send an OTP email.
+export function otpSendErrorMessage(err) {
+  if (err instanceof UserFacingError && err.code === "EMAIL_SEND_FAILED") {
+    return SAFE_MESSAGES.otpEmailFailed;
+  }
+  return getUserMessage(err);
+}
+
+// The extra timeout options are removed before fetch so they are never passed
+// as unsupported RequestInit properties to the browser.
 export async function safeFetchJson(url, options) {
+  const { timeoutMs, timeoutMessage, ...fetchOptions } = options || {};
+  const effectiveTimeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+    ? Number(timeoutMs)
+    : DEFAULT_TIMEOUT_MS;
   let res;
+  let timedOut = false;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, effectiveTimeout);
+
   try {
-    // credentials: "include" so the httpOnly session cookie set by the
-    // server on login is sent back on every subsequent request.
+    // credentials: "include" so the httpOnly session cookie is sent when needed.
     res = await fetch(url, {
       credentials: "include",
+      ...fetchOptions,
       signal: controller.signal,
-      ...options,
     });
   } catch (networkErr) {
+    if (timedOut && typeof timeoutMessage === "string" && timeoutMessage.trim()) {
+      throw new UserFacingError(timeoutMessage);
+    }
     throw new UserFacingError(SAFE_MESSAGES.offline);
   } finally {
     clearTimeout(timer);
@@ -432,10 +461,12 @@ export async function safeFetchJson(url, options) {
       Number(data && data.retryAfterSeconds) ||
       Number(res.headers.get("Retry-After")) ||
       0;
+    const code = typeof (data && data.code) === "string" ? data.code : "";
     throw new UserFacingError(
       toSafeMessage(res.status, data && data.error),
       res.status,
-      retryAfter
+      retryAfter,
+      code
     );
   }
   if (data === null) {

@@ -76,7 +76,6 @@ export function sniff(buf) {
 const ID_RE = /^[a-f\d]{24}$/i;
 // The next four are kept identical to src/components/applicationInputs.js
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-const MOBILE_RE = /^(?:\+63|0)9\d{9}$/;
 const NAME_RE = /^[\p{L}\p{M}][\p{L}\p{M}' \u2019-]*$/u;
 const OTHER_RE = /^[\p{L}\p{N}\p{M}][\p{L}\p{N}\p{M} '\u2019&\/.,()-]*$/u;
 const HAS_LETTER = /\p{L}/u;
@@ -123,14 +122,6 @@ function emailField(body, key, label) {
   return { value: v };
 }
 
-function mobileField(body, key, label) {
-  const v = clean(body[key]).replace(/[\s-]/g, "");
-  if (!v) return { error: `${label} is required.` };
-  if (!MOBILE_RE.test(v)) {
-    return { error: "Please enter a valid mobile number (09XXXXXXXXX or +639XXXXXXXXX)." };
-  }
-  return { value: v };
-}
 
 function pick(body, key, label, list) {
   const v = typeof body[key] === "string" ? body[key] : "";
@@ -147,10 +138,8 @@ function readFarmerFields(body) {
   return collect({
     fullName: nameField(body, "fullName", "Full name", 2, 100),
     email: emailField(body, "email", "Email"),
-    mobile: mobileField(body, "mobile", "Mobile number"),
     address: text(body, "address", "Address", 5, 200),
     farmLocation: text(body, "farmLocation", "Farm location", 3, 200),
-    farmingType: text(body, "farmingType", "Type of farming", 2, 100),
     products: text(body, "products", "Main agricultural products/crops", 2, 200),
     farmerStatus: pick(body, "farmerStatus", "your farmer status", FARMER_STATUSES),
     farmerStatusCustom: otherField(body, body.farmerStatus, "farmerStatusCustom", "farmer status"),
@@ -167,7 +156,6 @@ function readBuyerFields(body) {
     representative: text(body, "representative", "Authorized representative", 2, 100),
     businessAddress: text(body, "businessAddress", "Business address", 5, 200),
     businessEmail: emailField(body, "businessEmail", "Business email"),
-    mobile: mobileField(body, "mobile", "Mobile number"),
   });
 }
 

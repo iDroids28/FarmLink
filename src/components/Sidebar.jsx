@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   Sprout,
@@ -8,8 +8,11 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardList,
+  ClipboardCheck,
   PackageSearch,
+  PackageCheck,
   Send,
+  ShoppingBag,
   Handshake,
   Bell,
   Settings,
@@ -17,28 +20,36 @@ import {
   Store,
   Package,
   Lock,
+  Inbox,
 } from "lucide-react";
 import ConfirmDialog from "./ConfirmDialog.jsx";
+import { supplyApi } from "../api/supplyApi.js";
+import { roleApplicationApi } from "../api/roleApplicationApi.js";
 
-// Business / Buyer menu. The old "Apply as Farmer / Seller" item is removed.
+// Buyer menu: Find Supply, My Requests and My Pre Orders (order tracker).
 const BUYER_MENU = [
   { id: "dashboard",     label: "Dashboard",       icon: LayoutDashboard },
   { id: "demands",       label: "My Requirements", icon: ClipboardList },
   { id: "available",     label: "Find Supply",     icon: PackageSearch },
   { id: "matches",       label: "Matches",         icon: Handshake },
+  { id: "my-requests",   label: "My Requests",     icon: Send },
+  { id: "my-preorders",  label: "My Pre Orders",   icon: ShoppingBag },
   { id: "notifications", label: "Notification",    icon: Bell },
   { id: "profile",       label: "Profile",         icon: User },
   { id: "settings",      label: "Settings",        icon: Settings },
 ];
 
+// Farmer menu: Requests (accept / decline) then Order Management (order steps).
 const FARMER_MENU = [
-  { id: "dashboard",     label: "Dashboard",    icon: LayoutDashboard },
-  { id: "supply",        label: "My Supply",    icon: Sprout },
+  { id: "dashboard",         label: "Dashboard",         icon: LayoutDashboard },
+  { id: "supply",            label: "My Supply",         icon: Sprout },
   { id: "business-requests", label: "Business Requests", icon: Store },
-  { id: "matches",       label: "Matches",      icon: Handshake },
-  { id: "notifications", label: "Notification", icon: Bell },
-  { id: "profile",       label: "Profile",      icon: User },
-  { id: "settings",      label: "Settings",     icon: Settings },
+  { id: "matches",           label: "Matches",           icon: Handshake },
+  { id: "requests",          label: "Requests",          icon: Inbox },
+  { id: "orders",            label: "Order Management",  icon: PackageCheck },
+  { id: "notifications",     label: "Notification",      icon: Bell },
+  { id: "profile",           label: "Profile",           icon: User },
+  { id: "settings",          label: "Settings",          icon: Settings },
 ];
 
 // Plain registered account: only Dashboard is navigable. Logout is handled below.
@@ -51,17 +62,81 @@ export const MENU = {
   buyer: BUYER_MENU,
   farmer: FARMER_MENU,
   admin: [
-    { id: "dashboard",     label: "Dashboard",     icon: LayoutDashboard },
-    { id: "farmers",       label: "Farmers",       icon: Sprout },
-    { id: "buyers",        label: "Buyers",        icon: Store },
-    { id: "supply",        label: "Supply",        icon: Package },
-    { id: "requirements",  label: "Requirements",  icon: ClipboardList },
-    { id: "matchings",     label: "Matchings",     icon: Link2 },
-    { id: "notifications", label: "Notifications", icon: Bell },
-    { id: "profile",       label: "Profile",       icon: User }, // NEW: admin profile link
-    { id: "settings",      label: "Settings",      icon: Settings },
+    { id: "dashboard",         label: "Dashboard",          icon: LayoutDashboard },
+    { id: "farmers",           label: "Farmers",            icon: Sprout },
+    { id: "buyers",            label: "Buyers",             icon: Store },
+    { id: "supply-approvals",  label: "Supply Approvals",   icon: ClipboardCheck },
+    { id: "supply-management", label: "Supply Management",  icon: Package },
+    { id: "requirements",      label: "Requirements",       icon: ClipboardList },
+    { id: "matchings",         label: "Matchings",          icon: Link2 },
+    { id: "notifications",     label: "Notifications",      icon: Bell },
+    { id: "profile",           label: "Profile",            icon: User },
+    { id: "settings",          label: "Settings",           icon: Settings },
   ],
 };
+
+/* Red numbers per menu item. A missing item or 0 shows nothing. Re-read on open,
+   every 10 seconds, when the tab regains focus, and every time another page opens. */
+function useBadgeCounts(role, active) {
+  const [badges, setBadges] = useState({});
+
+  useEffect(() => {
+    if (!["buyer", "farmer", "admin"].includes(role)) {
+      setBadges({});
+      return undefined;
+    }
+    let alive = true;
+
+    async function load() {
+      const next = {};
+      try {
+        const c = await supplyApi.counts();
+        if (role === "buyer") {
+          next.notifications = c.notifications;
+          next.matches = c.matches;
+          next["my-requests"] = c.requests;
+          next["my-preorders"] = c.preorders;
+        } else if (role === "farmer") {
+          next.notifications = c.notifications;
+          next.matches = c.matches;
+          next.requests = c.requests;
+          next.supply = c.supply;
+        } else {
+          next.notifications = c.notifications;
+          next["supply-approvals"] = c.supplyApprovals;
+        }
+      } catch {
+        /* keep whatever we have */
+      }
+
+      if (role === "admin") {
+        try {
+          const [f, b] = await Promise.all([
+            roleApplicationApi.adminList({ type: "farmer", status: "pending" }),
+            roleApplicationApi.adminList({ type: "buyer", status: "pending" }),
+          ]);
+          next.farmers = (f.applications || []).length;
+          next.buyers = (b.applications || []).length;
+        } catch {
+          /* keep whatever we have */
+        }
+      }
+
+      if (alive) setBadges((old) => ({ ...old, ...next }));
+    }
+
+    load();
+    const timer = setInterval(load, 10000);
+    window.addEventListener("focus", load);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+      window.removeEventListener("focus", load);
+    };
+  }, [role, active]);
+
+  return badges;
+}
 
 export default function Sidebar({
   role = "user",
@@ -74,6 +149,7 @@ export default function Sidebar({
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [confirmLogoutOpen, setConfirmLogoutOpen] = useState(false);
+  const badges = useBadgeCounts(role, active);
 
   const items = MENU[role] || MENU.user;
 
@@ -81,6 +157,9 @@ export default function Sidebar({
     const isActive = item.id === active;
     const Icon = item.icon;
     const locked = item.sellerOnly && role !== "farmer";
+    const count = Number(badges[item.id]) || 0;
+    const countText = count > 99 ? "99+" : String(count);
+    const isNotificationItem = item.id === "notifications";
 
     return (
       <button
@@ -91,6 +170,7 @@ export default function Sidebar({
           onClose?.();
         }}
         aria-current={isActive ? "page" : undefined}
+        aria-label={count > 0 ? `${item.label}, ${countText} new` : item.label}
         title={collapsed ? item.label : locked ? "Apply as a Farmer first" : undefined}
         className={
           "group relative flex w-full items-center gap-3 rounded-xl py-2.5 text-[14px] transition " +
@@ -110,8 +190,28 @@ export default function Sidebar({
             (isActive ? "bg-[#7BC96F]" : "bg-transparent")
           }
         />
-        <Icon size={18} strokeWidth={isActive ? 2.4 : 2} className="shrink-0" />
+        <span className="relative shrink-0">
+          <Icon size={18} strokeWidth={isActive ? 2.4 : 2} />
+          {collapsed && count > 0 && (
+            isNotificationItem ? (
+              <span aria-hidden="true" className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-red-500 ring-2 ring-[#16301F]" />
+            ) : (
+              <span className="absolute -right-2 -top-2 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-white">
+                {countText}
+              </span>
+            )
+          )}
+        </span>
         {!collapsed && <span className="truncate">{item.label}</span>}
+        {!collapsed && count > 0 && (
+          isNotificationItem ? (
+            <span aria-hidden="true" className="ml-auto mr-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-red-500 ring-2 ring-[#16301F]" />
+          ) : (
+            <span className="ml-auto flex h-5 min-w-[20px] items-center justify-center rounded-full bg-red-500 px-1.5 text-[11px] font-bold leading-none text-white">
+              {countText}
+            </span>
+          )
+        )}
         {!collapsed && locked && <Lock size={13} className="ml-auto shrink-0" />}
       </button>
     );
@@ -180,11 +280,23 @@ export default function Sidebar({
             </div>
             {!collapsed && (
               <>
-                <div className="min-w-0 flex-1" />
+                <div className="min-w-0 flex-1">
+                  <p
+                    className="truncate text-[12px] font-semibold leading-4 text-white"
+                    title={user?.name || user?.email || "FarmLink User"}
+                  >
+                    {user?.name || user?.email || "FarmLink User"}
+                  </p>
+                  <p className="truncate text-[11px] leading-4 text-white/60">
+                    {{ user: "User", farmer: "Farmer", buyer: "Business / Buyer", admin: "Admin" }[
+                      String(role || user?.role || "user").toLowerCase()
+                    ] || "User"}
+                  </p>
+                </div>
                 <button
                   type="button"
                   onClick={() => setConfirmLogoutOpen(true)}
-                  className="text-white/60 hover:text-[#FF8A80] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+                  className="shrink-0 text-white/60 hover:text-[#FF8A80] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                   aria-label="Log out"
                   title="Log out"
                 >

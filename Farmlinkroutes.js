@@ -185,13 +185,11 @@ export default function createFarmlinkRouter({ User }) {
     const b = req.body || {};
     const farmName = str(b.farmName, 80);
     const location = str(b.location, 120);
-    const contact = str(b.contact, 30);
     const products = str(b.products, 200);
     const photo = typeof b.photo === "string" ? b.photo : "";
 
     if (!farmName) return bad(res, "Please enter your farm name.");
     if (!location) return bad(res, "Please enter your farm location.");
-    if (!contact) return bad(res, "Please enter your contact number.");
     if (!products) return bad(res, "Please list the products you sell.");
     if (!PHOTO_RE.test(photo)) return bad(res, "Please upload a photo of your farm or products.");
     if (photo.length > MAX_PHOTO_CHARS) return bad(res, "The photo is too large. Please choose a smaller one.");
@@ -202,7 +200,7 @@ export default function createFarmlinkRouter({ User }) {
     const doc = await Application.create({
       user: req.me._id, name: req.me.name, email: req.me.email,
       fullName: str(b.fullName, 80) || req.me.name,
-      farmName, location, contact, products,
+      farmName, location, products,
       farmSize: str(b.farmSize, 10),
       experience: str(b.experience, 10),
       description: str(b.description, 500),

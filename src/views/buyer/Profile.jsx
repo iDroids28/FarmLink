@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bell, Building2, Lock, Save, ShieldCheck, User } from "lucide-react";
+import { Bell, Lock, Save, ShieldCheck, User } from "lucide-react";
 import {
   EditableSection,
   InfoRow,
@@ -56,29 +56,19 @@ export default function Profile({ onRefreshUser }) {
         media={<PhotoBlock photo={profile.photo} onChange={(photo) => save({ photo })} />}
         fields={[
           { key: "name", label: "Full Name" },
+          { key: "businessName", label: "Business Name", placeholder: "Your business or organization (optional)" },
           { key: "email", label: "Email Address", readOnly: true },
-          { key: "phone", label: "Contact Number", type: "tel", placeholder: "0917 123 4567" },
           { key: "address", label: "Address" },
         ]}
-        values={{ name: user.name, email: user.email, phone: profile.phone, address: profile.address }}
+        values={{ name: user.name, businessName: profile.business?.name || "", email: user.email, address: profile.address }}
         onSave={async (d) => {
-          await save({ name: d.name, phone: d.phone, address: d.address });
+          await save({
+            name: d.name,
+            address: d.address,
+            business: { ...(profile.business || {}), name: d.businessName },
+          });
           onRefreshUser?.();
         }}
-      />
-
-      <EditableSection
-        icon={Building2}
-        title="Business / Organization Information"
-        media={<MediaCircle icon={Building2} />}
-        fields={[
-          { key: "name", label: "Business Name" },
-          { key: "orgType", label: "Organization Type", placeholder: "Restaurant / Food Business" },
-          { key: "address", label: "Business Address" },
-          { key: "contactPerson", label: "Contact Person" },
-        ]}
-        values={profile.business}
-        onSave={(d) => save({ business: d })}
       />
 
       <ProfileCard

@@ -25,8 +25,8 @@ const roleApplicationSchema = new Schema(
       index: true,
     },
 
-    // Shared
-    mobile: { type: String, required: true },
+    // Legacy field retained for older applications. New applications do not collect mobile numbers.
+    mobile: { type: String, default: "" },
 
     // Farmer application
     fullName: String,

@@ -46,8 +46,9 @@ export default function useMatchViewModel() {
     return ok;
   }
 
-  const confirm = (id) => mutate(() => matchRepository.confirm(id), "Match confirmed.");
+  const confirm = (id) => mutate(() => matchRepository.confirm(id), "Match accepted.");
   const decline = (id) => mutate(() => matchRepository.decline(id), "Match declined.");
+  const cancel = (id) => mutate(() => matchRepository.cancel(id), "Match cancelled.");
 
-  return { matches, loading, submitting, error, success, load, confirm, decline };
+  return { matches, loading, submitting, error, success, load, confirm, decline, cancel };
 }

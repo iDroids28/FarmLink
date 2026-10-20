@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Leaf, Lock, ShieldCheck, Sprout, User } from "lucide-react";
+import { Leaf, Lock, ShieldCheck, User } from "lucide-react";
 import {
   EditableSection,
   InfoRow,
@@ -46,30 +46,19 @@ export default function FarmerProfile({ onRefreshUser }) {
         media={<PhotoBlock photo={profile.photo} onChange={(photo) => save({ photo })} />}
         fields={[
           { key: "name", label: "Full Name" },
+          { key: "farmName", label: "Farm Name", placeholder: "Your farm name (optional)" },
           { key: "email", label: "Email Address", readOnly: true },
-          { key: "phone", label: "Contact Number", type: "tel", placeholder: "0917 123 7890" },
           { key: "address", label: "Address" },
         ]}
-        values={{ name: user.name, email: user.email, phone: profile.phone, address: profile.address }}
+        values={{ name: user.name, farmName: profile.farm?.name || "", email: user.email, address: profile.address }}
         onSave={async (d) => {
-          await save({ name: d.name, phone: d.phone, address: d.address });
+          await save({
+            name: d.name,
+            address: d.address,
+            farm: { ...(profile.farm || {}), name: d.farmName },
+          });
           onRefreshUser?.();
         }}
-      />
-
-      <EditableSection
-        icon={Sprout}
-        title="Farm Information"
-        media={<MediaCircle icon={Sprout} />}
-        fields={[
-          { key: "name", label: "Farm Name" },
-          { key: "location", label: "Farm Location" },
-          { key: "products", label: "Types of Products", placeholder: "Tomatoes, Rice, Corn" },
-          { key: "size", label: "Farm Size", placeholder: "2 hectares (optional)" },
-          { key: "expectedHarvest", label: "Expected Harvest", placeholder: "October – December 2026" },
-        ]}
-        values={profile.farm}
-        onSave={(d) => save({ farm: d })}
       />
 
       <ProfileCard
@@ -97,4 +86,4 @@ export default function FarmerProfile({ onRefreshUser }) {
       </ProfileCard>
     </ProfileShell>
   );
-}   
+}

@@ -1,247 +1,222 @@
 import express from "express";
-import mongoose from "mongoose";
+import { Match } from "./matchModel.js";
 import { authenticate, requireRole, writeLimiter } from "./security.js";
 import { respondWithSafeError } from "./safeErrors.js";
-import { Requirement, Supply, PreOrder } from "./marketModels.js";
+import { isValidId, round2 } from "./farmValidation.js";
+import { confirmMatch, declineMatch, cancelMatchByBuyer } from "./matchingEngine.js";
+import { businessNamesFor, businessProfileFor } from "./businessProfile.js";
+import { Demand, Supply } from "./farmModels.js";
+import { breakdownFor, COUNTED_MATCH } from "./demandBreakdown.js";
 
-const CATEGORIES = ["Vegetables", "Fruits", "Grains", "Root Crops", "Livestock & Poultry", "Others"];
-const UNITS = ["kg", "sack", "piece", "bundle"];
-const MAX_QTY = 100000;
+const NOT_FOUND = { error: "Match not found." };
+const NOT_PENDING = { error: "This match request can no longer be changed." };
 
-const clean = (v, max) => (typeof v === "string" ? v.trim().slice(0, max) : "");
-const isDate = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
-// Philippine date (UTC+8) so "today" is correct even if the server runs in UTC.
-const today = () => new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
-const code = (p, id) => `${p}-${String(id).slice(-6).toUpperCase()}`;
-const isId = (id) => mongoose.isValidObjectId(id);
-const NAME_RE = /^[A-Za-zÑñ][A-Za-zÑñ\s\-']*$/;
-
-const reqOut = (r) => ({
-  id: r._id, code: code("REQ", r._id), category: r.category, product: r.product,
-  quantity: r.quantity, unit: r.unit, neededDate: r.neededDate, location: r.location,
-  targetPrice: r.targetPrice, notes: r.notes, status: r.status, matched: r.matched || 0,
-  createdAt: r.createdAt,
-});
-const supplyOut = (s) => ({
-  id: s._id, code: code("SUP", s._id), category: s.category, product: s.product,
-  quantity: s.quantity, unit: s.unit, price: s.price, availableDate: s.availableDate,
-  location: s.location, description: s.description, status: s.status,
-  farmerName: s.farmerName, createdAt: s.createdAt,
-});
-const orderOut = (o) => ({
-  id: o._id, code: code("PRE", o._id), supplyId: o.supply, product: o.product,
-  unit: o.unit, price: o.price, quantity: o.quantity, total: o.price * o.quantity,
-  neededDate: o.neededDate, notes: o.notes, status: o.status,
-  buyerName: o.buyerName, farmerName: o.farmerName, createdAt: o.createdAt,
-});
-
-function checkProduct(product) {
-  if (!product) return "Please enter the product name.";
-  if (product.length < 2) return "Product name is too short.";
-  if (!NAME_RE.test(product)) return "Product name: letters only.";
-  return null;
+// Farmer sees the request and approved business name, but not buyer user ID,
+// personal name, or email in the generic Matches response.
+function farmerView(m, businessName) {
+  const view = {
+    id: String(m._id),
+    product: m.product,
+    quantity: m.quantity,
+    unit: m.unit,
+    neededDate: m.neededDate,
+    location: m.location,
+    status: m.status,
+    createdAt: m.createdAt,
+  };
+  if (businessName !== undefined) view.businessName = businessName || null;
+  return view;
 }
-function checkQty(q) {
-  if (!Number.isInteger(q) || q <= 0) return "Quantity must be a whole number greater than 0.";
-  if (q > MAX_QTY) return `Quantity cannot be more than ${MAX_QTY}.`;
-  return null;
+function buyerView(m) {
+  return {
+    id: String(m._id), product: m.product, quantity: m.quantity, unit: m.unit,
+    availabilityDate: m.availabilityDate, location: m.location, status: m.status, createdAt: m.createdAt,
+  };
 }
 
-export default function createMarketRouter() {
+export default function createMatchRouter() {
   const router = express.Router();
+  router.use(authenticate);
 
-  /* ================= BUYER REQUIREMENTS ================= */
-
-  router.get("/requirements/mine", authenticate, async (req, res) => {
+  router.get("/mine", requireRole("farmer", "buyer"), async (req, res) => {
     try {
-      const list = await Requirement.find({ buyer: req.user.id }).sort({ createdAt: -1 });
-      res.json({ requirements: list.map(reqOut) });
-    } catch (err) { respondWithSafeError(res, err, "Load requirements error"); }
-  });
-
-  router.post("/requirements", authenticate, writeLimiter, async (req, res) => {
-    try {
-      const b = req.body || {};
-      const product = clean(b.product, 40);
-      const location = clean(b.location, 100);
-      const qty = Number(b.quantity);
-      const price = b.targetPrice === undefined || b.targetPrice === "" || b.targetPrice === null
-        ? undefined : Number(b.targetPrice);
-
-      const err =
-        (!CATEGORIES.includes(b.category) && "Please select a category.") ||
-        checkProduct(product) ||
-        checkQty(qty) ||
-        (!UNITS.includes(b.unit) && "Please select a unit.") ||
-        (!isDate(b.neededDate) && "Please select the needed date.") ||
-        (b.neededDate < today() && "Needed date cannot be in the past.") ||
-        (location.length < 3 && "Please enter the delivery location.") ||
-        (price !== undefined && (!Number.isFinite(price) || price < 0 || price > 1000000) && "Invalid target price.");
-      if (err) return res.status(400).json({ error: err });
-
-      const doc = await Requirement.create({
-        buyer: req.user.id, category: b.category, product, quantity: qty, unit: b.unit,
-        neededDate: b.neededDate, location, targetPrice: price, notes: clean(b.notes, 300),
-      });
-      res.status(201).json({ requirement: reqOut(doc) });
-    } catch (err) { respondWithSafeError(res, err, "Create requirement error"); }
-  });
-
-  router.patch("/requirements/:id/close", authenticate, async (req, res) => {
-    try {
-      if (!isId(req.params.id)) return res.status(400).json({ error: "Invalid request." });
-      const doc = await Requirement.findOneAndUpdate(
-        { _id: req.params.id, buyer: req.user.id },
-        { status: "Closed" }, { new: true }
-      );
-      if (!doc) return res.status(404).json({ error: "Requirement not found." });
-      res.json({ requirement: reqOut(doc) });
-    } catch (err) { respondWithSafeError(res, err, "Close requirement error"); }
-  });
-
-  /* ================= FARMER SUPPLY ================= */
-
-  router.get("/supplies/mine", authenticate, requireRole("farmer", "admin"), async (req, res) => {
-    try {
-      const list = await Supply.find({ farmer: req.user.id, status: { $ne: "Removed" } }).sort({ createdAt: -1 });
-      res.json({ supplies: list.map(supplyOut) });
-    } catch (err) { respondWithSafeError(res, err, "Load my supply error"); }
-  });
-
-  router.post("/supplies", authenticate, requireRole("farmer", "admin"), writeLimiter, async (req, res) => {
-    try {
-      const b = req.body || {};
-      const product = clean(b.product, 40);
-      const location = clean(b.location, 100);
-      const qty = Number(b.quantity);
-      const price = Number(b.price);
-
-      const err =
-        (!CATEGORIES.includes(b.category) && "Please select a category.") ||
-        checkProduct(product) ||
-        checkQty(qty) ||
-        (!UNITS.includes(b.unit) && "Please select a unit.") ||
-        (!Number.isFinite(price) || price <= 0 || price > 1000000 ? "Enter a valid price per unit." : null) ||
-        (!isDate(b.availableDate) && "Please select the available date.") ||
-        (b.availableDate < today() && "Available date cannot be in the past.") ||
-        (location.length < 3 && "Please enter the location.");
-      if (err) return res.status(400).json({ error: err });
-
-      const me = await mongoose.model("User").findById(req.user.id).select("name").lean();
-      const doc = await Supply.create({
-        farmer: req.user.id, farmerName: me?.name || "Farmer", category: b.category,
-        product, quantity: qty, unit: b.unit, price, availableDate: b.availableDate,
-        location, description: clean(b.description, 300),
-      });
-      res.status(201).json({ supply: supplyOut(doc) });
-    } catch (err) { respondWithSafeError(res, err, "Create supply error"); }
-  });
-
-  router.patch("/supplies/:id/remove", authenticate, requireRole("farmer", "admin"), async (req, res) => {
-    try {
-      if (!isId(req.params.id)) return res.status(400).json({ error: "Invalid request." });
-      const doc = await Supply.findOneAndUpdate(
-        { _id: req.params.id, farmer: req.user.id }, { status: "Removed" }, { new: true }
-      );
-      if (!doc) return res.status(404).json({ error: "Supply not found." });
-      res.json({ supply: supplyOut(doc) });
-    } catch (err) { respondWithSafeError(res, err, "Remove supply error"); }
-  });
-
-  /* ================= FIND SUPPLY (buyers browse) ================= */
-
-  router.get("/supplies/available", authenticate, async (req, res) => {
-    try {
-      const list = await Supply.find({
-        status: "Available", quantity: { $gt: 0 }, farmer: { $ne: req.user.id },
-      }).sort({ createdAt: -1 });
-      res.json({ supplies: list.map(supplyOut) });
-    } catch (err) { respondWithSafeError(res, err, "Load available supply error"); }
-  });
-
-  /* ================= PRE-ORDERS ================= */
-
-  router.post("/preorders", authenticate, writeLimiter, async (req, res) => {
-    try {
-      const b = req.body || {};
-      if (!isId(b.supplyId)) return res.status(400).json({ error: "Invalid supply." });
-      const supply = await Supply.findById(b.supplyId);
-      if (!supply || supply.status !== "Available" || supply.quantity <= 0)
-        return res.status(404).json({ error: "This supply is no longer available." });
-      if (String(supply.farmer) === req.user.id)
-        return res.status(400).json({ error: "You cannot pre-order your own supply." });
-
-      const qty = Number(b.quantity);
-      const err =
-        checkQty(qty) ||
-        (qty > supply.quantity && `Only ${supply.quantity} ${supply.unit} available.`) ||
-        (!isDate(b.neededDate) && "Please select the date you need it.") ||
-        (b.neededDate < today() && "Date cannot be in the past.");
-      if (err) return res.status(400).json({ error: err });
-
-      const me = await mongoose.model("User").findById(req.user.id).select("name").lean();
-      const doc = await PreOrder.create({
-        supply: supply._id, buyer: req.user.id, buyerName: me?.name || "Buyer",
-        farmer: supply.farmer, farmerName: supply.farmerName, product: supply.product,
-        unit: supply.unit, price: supply.price, quantity: qty, neededDate: b.neededDate,
-        notes: clean(b.notes, 300),
-      });
-      res.status(201).json({ preorder: orderOut(doc) });
-    } catch (err) { respondWithSafeError(res, err, "Create pre-order error"); }
-  });
-
-  // Buyer: my pre-orders
-  router.get("/preorders/mine", authenticate, async (req, res) => {
-    try {
-      const list = await PreOrder.find({ buyer: req.user.id }).sort({ createdAt: -1 });
-      res.json({ preorders: list.map(orderOut) });
-    } catch (err) { respondWithSafeError(res, err, "Load pre-orders error"); }
-  });
-
-  // Farmer: pre-orders from buyers
-  router.get("/preorders/incoming", authenticate, requireRole("farmer", "admin"), async (req, res) => {
-    try {
-      const list = await PreOrder.find({ farmer: req.user.id }).sort({ createdAt: -1 });
-      res.json({ preorders: list.map(orderOut) });
-    } catch (err) { respondWithSafeError(res, err, "Load incoming error"); }
-  });
-
-  // Buyer cancels own pending pre-order
-  router.patch("/preorders/:id/cancel", authenticate, async (req, res) => {
-    try {
-      if (!isId(req.params.id)) return res.status(400).json({ error: "Invalid request." });
-      const doc = await PreOrder.findOneAndUpdate(
-        { _id: req.params.id, buyer: req.user.id, status: "Pending" },
-        { status: "Cancelled" }, { new: true }
-      );
-      if (!doc) return res.status(404).json({ error: "Pre-order not found or already handled." });
-      res.json({ preorder: orderOut(doc) });
-    } catch (err) { respondWithSafeError(res, err, "Cancel pre-order error"); }
-  });
-
-  // Farmer accepts / declines
-  router.patch("/preorders/:id/decision", authenticate, requireRole("farmer", "admin"), async (req, res) => {
-    try {
-      const { decision } = req.body || {};
-      if (!isId(req.params.id) || !["Accepted", "Declined"].includes(decision))
-        return res.status(400).json({ error: "Invalid request." });
-
-      const order = await PreOrder.findOne({ _id: req.params.id, farmer: req.user.id, status: "Pending" });
-      if (!order) return res.status(404).json({ error: "Pre-order not found or already handled." });
-
-      if (decision === "Accepted") {
-        // Atomic: only subtract if enough stock is still there.
-        const supply = await Supply.findOneAndUpdate(
-          { _id: order.supply, quantity: { $gte: order.quantity }, status: "Available" },
-          { $inc: { quantity: -order.quantity } }, { new: true }
-        );
-        if (!supply) return res.status(409).json({ error: "Not enough stock left for this pre-order." });
-        if (supply.quantity === 0) { supply.status = "Sold Out"; await supply.save(); }
+      const isFarmer = req.user.role === "farmer";
+      const rows = await Match.find(isFarmer ? { farmer: req.user.id } : { buyer: req.user.id })
+        .sort({ createdAt: -1 })
+        .limit(200)
+        .lean();
+      if (isFarmer) {
+        const names = await businessNamesFor(rows.map((row) => row.buyer));
+        return res.json({
+          matches: rows.map((row) =>
+            farmerView(row, names.get(String(row.buyer)) ?? null)
+          ),
+        });
       }
-      order.status = decision;
-      await order.save();
-      res.json({ preorder: orderOut(order) });
-    } catch (err) { respondWithSafeError(res, err, "Decide pre-order error"); }
+      res.json({ matches: rows.map(buyerView) });
+    } catch (err) {
+      respondWithSafeError(res, err, "Load matches error");
+    }
+  });
+
+  // Farmer OR buyer: one of THEIR OWN matches, for the Notifications pop-up.
+  // The lookup filters by the caller's side, so someone else's match is a 404.
+  // Contains no names, emails or ids of the other person.
+  router.get("/:id/summary", requireRole("farmer", "buyer"), async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
+      const side = req.user.role === "farmer" ? "farmer" : "buyer";
+
+      const m = await Match.findOne({ _id: req.params.id, [side]: req.user.id })
+        .select("demand supply product unit quantity status location neededDate availabilityDate")
+        .lean();
+      if (!m) return res.status(404).json(NOT_FOUND);
+
+      const [demand, breakdowns, supply] = await Promise.all([
+        Demand.findById(m.demand).select("quantity").lean(),
+        breakdownFor([m.demand]),
+        Supply.findById(m.supply).select("supplyType").lean(),
+      ]);
+      const b = breakdowns.get(String(m.demand)) || { pending: 0, confirmed: 0 };
+      const total = demand ? demand.quantity : m.quantity;
+      const covered = Math.min(round2(b.confirmed + b.pending), total);
+
+      res.json({
+        summary: {
+          id: String(m._id),
+          status: m.status,
+          product: m.product,
+          quantity: m.quantity,
+          unit: m.unit,
+          location: m.location,
+          neededDate: m.neededDate,
+          availabilityDate: m.availabilityDate,
+          supplyType: supply?.supplyType || "onhand",
+          requestedQuantity: total,
+          confirmedQuantity: b.confirmed,
+          pendingQuantity: b.pending,
+          // Still needed after this match (pending + confirmed are already counted).
+          remainingQuantity: Math.max(0, round2(total - covered)),
+        },
+      });
+    } catch (err) {
+      respondWithSafeError(res, err, "Load match summary error");
+    }
+  });
+
+  // Farmer-only details for the "View Details" modal, in one call.
+  // Ownership: the lookup filters by farmer, so someone else's match is a 404.
+  // Nothing returned contains the demand id, buyer id, or application documents.
+  router.get("/:id/details", requireRole("farmer"), async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
+
+      const m = await Match.findOne({ _id: req.params.id, farmer: req.user.id })
+        .select("demand buyer product unit quantity status")
+        .lean();
+      if (!m) return res.status(404).json(NOT_FOUND);
+
+      const [demand, breakdowns, profile] = await Promise.all([
+        Demand.findById(m.demand)
+          .select("product quantity unit neededDate location")
+          .lean(),
+        breakdownFor([m.demand]),
+        businessProfileFor(m.buyer),
+      ]);
+      if (!demand) return res.status(404).json(NOT_FOUND);
+
+      // Same rules as /demands/for-farmers: pending + confirmed only,
+      // capped at the requested quantity, never negative.
+      const b = breakdowns.get(String(demand._id)) || { pending: 0, confirmed: 0 };
+      const covered = Math.min(round2(b.confirmed + b.pending), demand.quantity);
+      const percent =
+        demand.quantity > 0
+          ? Math.min(100, Math.max(0, (covered / demand.quantity) * 100))
+          : 0;
+
+      // Contacts only while this farmer has a pending/confirmed match on the demand.
+      const contactVisible =
+        COUNTED_MATCH.includes(m.status) ||
+        Boolean(
+          await Match.exists({
+            demand: demand._id,
+            farmer: req.user.id,
+            status: { $in: COUNTED_MATCH },
+          })
+        );
+
+      res.json({
+        details: {
+          match: {
+            id: String(m._id),
+            status: m.status,
+            product: m.product,
+            quantity: m.quantity,
+            unit: m.unit,
+          },
+          demand: {
+            product: demand.product,
+            quantity: demand.quantity,
+            unit: demand.unit,
+            neededDate: demand.neededDate,
+            location: demand.location,
+            confirmedQuantity: b.confirmed,
+            pendingQuantity: b.pending,
+            matchedQuantity: covered,
+            remainingQuantity: Math.max(0, round2(demand.quantity - covered)),
+            progressPercent: Math.round(percent * 10) / 10,
+          },
+          business: profile
+            ? {
+                businessName: profile.businessName,
+                businessType: profile.businessType,
+                businessAddress: profile.businessAddress,
+                contactVisible,
+                representative: contactVisible ? profile.representative : null,
+                businessEmail: contactVisible ? profile.businessEmail : null,
+                mobile: contactVisible ? profile.mobile : null,
+              }
+            : null,
+        },
+      });
+    } catch (err) {
+      respondWithSafeError(res, err, "Load match details error");
+    }
+  });
+
+  async function decide(req, res, action, label) {
+    try {
+      if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
+      const m = await action(req.params.id, req.user.id);
+      if (m) return res.json({ match: farmerView(m) });
+
+      // Same "not found" for someone else's match; 409 only for the owner.
+      const own = await Match.exists({ _id: req.params.id, farmer: req.user.id });
+      if (!own) return res.status(404).json(NOT_FOUND);
+      res.status(409).json(NOT_PENDING);
+    } catch (err) {
+      respondWithSafeError(res, err, label);
+    }
+  }
+
+  router.post("/:id/confirm", writeLimiter, requireRole("farmer"), (req, res) =>
+    decide(req, res, confirmMatch, "Confirm match error"));
+  router.post("/:id/decline", writeLimiter, requireRole("farmer"), (req, res) =>
+    decide(req, res, declineMatch, "Decline match error"));
+
+  // Buyer: cancel one match that is still waiting for the farmer.
+  router.post("/:id/cancel", writeLimiter, requireRole("buyer"), async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
+      const m = await cancelMatchByBuyer(req.params.id, req.user.id);
+      if (m) return res.json({ match: buyerView(m) });
+
+      const own = await Match.exists({ _id: req.params.id, buyer: req.user.id });
+      if (!own) return res.status(404).json(NOT_FOUND);
+      res.status(409).json({ error: "This match can no longer be cancelled." });
+    } catch (err) {
+      respondWithSafeError(res, err, "Cancel match error");
+    }
   });
 
   return router;

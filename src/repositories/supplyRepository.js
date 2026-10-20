@@ -1,23 +1,23 @@
 import { apiClient } from "../services/api/apiClient";
 
-/* Hides the endpoint URLs from the rest of the app. */
+/* All supply calls in one place. The server answers { supplies: [...] }
+   or { supply: {...} }, so each function returns the plain data. */
 export const supplyRepository = {
-  async listMine() {
-    return (await apiClient.get("/supplies/mine")).supplies;
+  // Farmer: own listings.
+  listMine: () => apiClient.get("/supplies/mine").then((d) => d?.supplies || []),
+
+  // Buyer: supply that farmers posted and that is still available.
+  listAvailable: () => apiClient.get("/supplies/available").then((d) => d?.supplies || []),
+
+  create: (payload) => apiClient.post("/supplies", payload).then((d) => d?.supply || null),
+
+  update: (id, payload) => {
+    const send = apiClient.patch || apiClient.put;
+    if (!send) return Promise.reject(new Error("Editing supply is not available."));
+    return send.call(apiClient, `/supplies/${id}`, payload).then((d) => d?.supply || null);
   },
-  async listAvailable() {
-    return (await apiClient.get("/supplies/available")).supplies;
-  },
-  async getById(id) {
-    return (await apiClient.get(`/supplies/${encodeURIComponent(id)}`)).supply;
-  },
-  async create(payload) {
-    return (await apiClient.post("/supplies", payload)).supply;
-  },
-  async update(id, payload) {
-    return (await apiClient.patch(`/supplies/${encodeURIComponent(id)}`, payload)).supply;
-  },
-  async cancel(id) {
-    return (await apiClient.post(`/supplies/${encodeURIComponent(id)}/cancel`)).supply;
-  },
+
+  cancel: (id) => apiClient.post(`/supplies/${id}/cancel`).then((d) => d?.supply || null),
 };
+
+export default supplyRepository;

@@ -2,6 +2,7 @@ import express from "express";
 import { Notice } from "./noticeModel.js";
 import { authenticate, writeLimiter } from "./security.js";
 import { respondWithSafeError } from "./safeErrors.js";
+import { isValidId } from "./farmValidation.js";
 
 export default function createNoticeRouter() {
   const router = express.Router();
@@ -18,10 +19,23 @@ export default function createNoticeRouter() {
         notifications: rows.map((n) => ({
           id: String(n._id), type: n.type, title: n.title,
           message: n.message, read: n.read, createdAt: n.createdAt,
+          matchId: n.match ? String(n.match) : null,
+          requestId: n.request ? String(n.request) : null,
         })),
       });
     } catch (err) {
       respondWithSafeError(res, err, "Load notices error");
+    }
+  });
+
+  router.post("/:id/read", writeLimiter, async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(404).json({ error: "Notification not found." });
+      await Notice.updateOne({ _id: req.params.id, user: req.user.id }, { read: true });
+      const unread = await Notice.countDocuments({ user: req.user.id, read: false });
+      res.json({ ok: true, unread });
+    } catch (err) {
+      respondWithSafeError(res, err, "Mark notice read error");
     }
   });
 

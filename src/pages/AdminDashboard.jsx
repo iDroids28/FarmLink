@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { Users, Sprout, Store, UserCheck } from "lucide-react";
 import GlassCard from "../components/GlassCard.jsx";
 import { DataTable, StatusBadge, LoadNote } from "../components/DemoBits.jsx";
 import { fmtDate } from "../components/RoleApplicationParts.jsx";
 import { roleApplicationApi, errorMessage } from "../api/roleApplicationApi.js";
+import { supplyApi } from "../api/supplyApi.js";
 import { API_URL } from "../AuthShared";
 
 // Same base derivation roleApplicationApi.js uses: API_URL minus "/auth".
@@ -38,6 +38,8 @@ export default function AdminDashboard({ user, onNavigate }) {
   // Account totals come from GET /api/admin/stats (users.total / farmer / buyer).
   const [stats, setStats] = useState(null);
   const [statsError, setStatsError] = useState("");
+  // Products waiting in Supply Approvals.
+  const [supplyPending, setSupplyPending] = useState(null);
 
   const loadApps = useCallback(
     () =>
@@ -64,13 +66,29 @@ export default function AdminDashboard({ user, onNavigate }) {
     []
   );
 
-  const load = useCallback(() => Promise.all([loadApps(), loadTotals()]), [loadApps, loadTotals]);
+  const loadSupply = useCallback(
+    () =>
+      supplyApi
+        .adminPending()
+        .then((d) => setSupplyPending((d.supplies || []).length))
+        .catch(() => {}),
+    []
+  );
 
-  // Load on open, and again whenever the admin returns to this tab.
+  const load = useCallback(
+    () => Promise.all([loadApps(), loadTotals(), loadSupply()]),
+    [loadApps, loadTotals, loadSupply]
+  );
+
+  // Load on open, every 15 seconds, and again whenever the admin returns to this tab.
   useEffect(() => {
     load();
+    const timer = setInterval(load, 15000);
     window.addEventListener("focus", load);
-    return () => window.removeEventListener("focus", load);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", load);
+    };
   }, [load]);
 
   const rows = pending
@@ -80,10 +98,11 @@ export default function AdminDashboard({ user, onNavigate }) {
   const pendingSub = pending ? `${pending.farmer.length} Farmer · ${pending.buyer.length} Buyer` : "";
 
   const cards = [
-    { label: "Total Users", value: stats?.users?.total, icon: Users },
-    { label: "Farmers", value: stats?.users?.farmer, icon: Sprout },
-    { label: "Buyers", value: stats?.users?.buyer, icon: Store },
-    { label: "Pending Applications", value: pendingCount, sub: pendingSub, icon: UserCheck },
+    { label: "Total Users", value: stats?.users?.total },
+    { label: "Farmers", value: stats?.users?.farmer },
+    { label: "Buyers", value: stats?.users?.buyer },
+    { label: "Pending Applications", value: pendingCount, sub: pendingSub },
+    { label: "Pending Supply", value: supplyPending ?? undefined, sub: "Waiting for approval", review: "supply-approvals" },
   ];
   const name = (user?.name || user?.email || "there").split("@")[0];
 
@@ -124,20 +143,26 @@ export default function AdminDashboard({ user, onNavigate }) {
             Admin
           </span>
         </div>
-        <p className="text-[13.5px] text-gray-500">An overview of users and applications.</p>
+        <p className="text-[13.5px] text-gray-500">An overview of users, applications and supply.</p>
       </div>
 
       <LoadNote loading={(!pending || !stats) && !loadError && !statsError} error={loadError || statsError} />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {cards.map(({ label, value, sub, icon: Icon }) => (
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        {cards.map(({ label, value, sub, review }) => (
           <GlassCard key={label}>
-            <div className="flex items-center justify-between">
-              <span className="text-[12.5px] text-gray-500">{label}</span>
-              <Icon size={16} className="text-[#4CAF50]" />
-            </div>
+            <span className="text-[12.5px] text-gray-500">{label}</span>
             <p className="mt-2 text-[24px] font-bold text-[#16301F]">{value ?? "—"}</p>
             {sub && <p className="text-[12px] text-gray-500">{sub}</p>}
+            {review && (
+              <button
+                type="button"
+                onClick={() => onNavigate?.(review)}
+                className="mt-2 text-[12.5px] font-semibold text-[#2E7D32] hover:underline"
+              >
+                Review
+              </button>
+            )}
           </GlassCard>
         ))}
       </div>

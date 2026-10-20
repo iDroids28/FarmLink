@@ -9,7 +9,8 @@ const applicationSchema = new Schema(
     email: String,
     farmName: { type: String, required: true },
     location: { type: String, required: true },
-    contact: { type: String, required: true },
+    // Legacy only; current application forms no longer collect mobile/contact numbers.
+    contact: { type: String, default: "" },
     products: { type: String, required: true },
     farmSize: String,
     description: String,

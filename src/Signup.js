@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Mail, User, ShieldCheck, X } from "lucide-react";
+import { Mail, User, ShieldCheck, X, Check } from "lucide-react";
 import {
   Shell,
   Header,
@@ -19,6 +19,25 @@ import {
   sanitizePassword,
   API_URL,
 } from "./AuthShared";
+
+/* ---------------- OTP EMAIL HELPERS ----------------
+   Longer timeout ONLY for requests that send an OTP email (the server gives up
+   on a slow email after 30s). If AuthShared's safeFetchJson does not support
+   these options, they are simply ignored and nothing breaks. */
+
+const OTP_SEND_OPTIONS = {
+  timeoutMs: 45000,
+  timeoutMessage:
+    "Sending the email took too long. Please try again, and use the newest code if more than one email arrives.",
+};
+
+const OTP_EMAIL_FAILED_UI =
+  "We couldn't send the verification email right now. Please try again in a moment.";
+
+function otpSendErrorMessage(err) {
+  if (err && err.code === "EMAIL_SEND_FAILED") return OTP_EMAIL_FAILED_UI;
+  return getUserMessage(err);
+}
 
 /* ---------------- VERIFY-CODE POPUP ---------------- */
 
@@ -81,17 +100,18 @@ function VerifyCodeModal({ email, resendSeconds, onVerified, onCancel }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
+      ...OTP_SEND_OPTIONS,
     })
       .then((data) => {
         setResending(false);
         setCode("");
         setCooldown(Number(data?.resendAfterSeconds) || 30);
-        setInfo("A new code was sent. Check the terminal again.");
+        setInfo("A new code was sent. Check your Gmail inbox and spam folder.");
       })
       .catch((err) => {
         setResending(false);
         if (err?.retryAfter) setCooldown(err.retryAfter);
-        setError(getUserMessage(err));
+        setError(otpSendErrorMessage(err));
       });
   }
 
@@ -125,11 +145,11 @@ function VerifyCodeModal({ email, resendSeconds, onVerified, onCancel }) {
             Verify your email
           </h2>
           <p className="mb-1 text-center text-[13px] text-gray-500">
-            We created a 6-digit code for{" "}
+            We sent a 6-digit code to{" "}
             <span className="break-all font-semibold text-[#2E7D32]">{email}</span>
           </p>
           <p className="mb-5 rounded-lg bg-[#F1F8E9] px-3 py-2 text-center text-[12px] text-[#33691E]">
-            Look at the terminal where your server is running (<b>node server.js</b>) and type the code you see there.
+            Check your Gmail <b>inbox</b> and <b>spam</b> folder, then type the code here.
           </p>
 
           <form onSubmit={handleVerify} className="w-full space-y-3.5" noValidate>
@@ -174,6 +194,66 @@ function VerifyCodeModal({ email, resendSeconds, onVerified, onCancel }) {
   );
 }
 
+/* ---------------- ACCOUNT CREATED POPUP ---------------- */
+
+function AccountCreatedModal({ onOk }) {
+  // Esc also acts as "OK". Enter works through the focused OK button.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onOk();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onOk]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-6"
+      style={{ fontFamily: "'Inter', system-ui, sans-serif" }}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="created-title"
+    >
+      <div className="relative w-full max-w-[340px] overflow-hidden rounded-3xl bg-white px-7 py-8 shadow-2xl">
+        <div
+          className="absolute inset-x-0 top-0 h-1.5"
+          style={{ background: "linear-gradient(90deg, #8BC34A, #4CAF50, #2E7D32)" }}
+        />
+
+        <div className="flex flex-col items-center">
+          <div
+            className="mb-3 flex h-14 w-14 items-center justify-center rounded-full"
+            style={{ background: "linear-gradient(90deg, #4CAF50, #2E7D32)" }}
+          >
+            <Check size={30} color="#fff" strokeWidth={3} />
+          </div>
+          <h2
+            id="created-title"
+            className="mb-1 text-center text-xl font-bold tracking-tight text-[#1B5E20]"
+          >
+            Account created
+          </h2>
+          <p className="mb-5 text-center text-[13px] text-gray-500">
+            Your account was successfully created.
+          </p>
+          <button
+            type="button"
+            autoFocus
+            onClick={onOk}
+            className="rounded-full px-8 py-2 text-[13px] font-bold tracking-wide text-white transition hover:brightness-110 active:scale-[0.99]"
+            style={{
+              background: "linear-gradient(90deg, #4CAF50, #2E7D32)",
+              boxShadow: "0 6px 14px rgba(46,125,50,0.30)",
+            }}
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- SIGN UP PAGE ---------------- */
 
 export default function Signup({ onGoToLogin }) {
@@ -189,6 +269,9 @@ export default function Signup({ onGoToLogin }) {
 
   // The code popup: null = closed, otherwise { email, resendSeconds }
   const [verify, setVerify] = useState(null);
+
+  // true after the code is verified and the account exists
+  const [created, setCreated] = useState(false);
 
   function handleSignupSubmit(e) {
     e.preventDefault();
@@ -231,10 +314,11 @@ export default function Signup({ onGoToLogin }) {
         password: signupPassword,
         consent: true,
       }),
+      ...OTP_SEND_OPTIONS,
     })
       .then((data) => {
         setSignupSubmitting(false);
-        // The server printed the code in its terminal — open the code popup.
+        // The server emailed the code — open the code popup.
         setVerify({
           email: data?.email || cleanEmail,
           resendSeconds: Number(data?.resendAfterSeconds) || 30,
@@ -242,7 +326,7 @@ export default function Signup({ onGoToLogin }) {
       })
       .catch((err) => {
         setSignupSubmitting(false);
-        setSignupError(getUserMessage(err));
+        setSignupError(otpSendErrorMessage(err));
       });
   }
 
@@ -313,9 +397,18 @@ export default function Signup({ onGoToLogin }) {
           resendSeconds={verify.resendSeconds}
           onVerified={() => {
             setVerify(null);
-            onGoToLogin(); // account created — go to Log In
+            setCreated(true); // show the success popup first
           }}
           onCancel={() => setVerify(null)}
+        />
+      )}
+
+      {created && (
+        <AccountCreatedModal
+          onOk={() => {
+            setCreated(false);
+            onGoToLogin(); // go to Log In only after the user presses OK
+          }}
         />
       )}
     </>

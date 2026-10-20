@@ -6,11 +6,15 @@ import { StatusBadge, statusTone, formatDate, formatQty } from "../../components
 import useDemandViewModel from "../../viewmodels/useDemandViewModel";
 import { EMPTY_DEMAND_FORM, DEMAND_STATUS_LABEL, canCancelDemand } from "../../models/demand/Demand";
 import {
-  UNITS, todayISO, checkProduct, checkQuantity, checkUnit, checkDate, checkLocation,
+  todayISO, checkProduct, checkQuantity, checkUnit, checkDate, checkLocation,
 } from "../../models/common";
+import LocationPicker from "../../components/LocationPicker.jsx";
 
 const REQ_ICON = "/reqr.png";
-const PRODUCTS = ["Potato", "Tomato", "Rice", "Eggplant", "Corn", "Cabbage", "Lettuce"];
+
+// Requirements are in kg only.
+const UNITS = ["kg"];
+const BLANK_FORM = { ...EMPTY_DEMAND_FORM, unit: "kg" };
 
 const FILTERS = [
   { label: "All", statuses: null },
@@ -38,7 +42,7 @@ export default function MyDemands({ onNavigate, intent }) {
   const vm = useDemandViewModel();
   const { loadDemands, clearMessages } = vm;
   const [filter, setFilter] = useState("All");
-  const [form, setForm] = useState(EMPTY_DEMAND_FORM);
+  const [form, setForm] = useState(BLANK_FORM);
   const [fieldErrors, setFieldErrors] = useState({});
   const [showForm, setShowForm] = useState(false);
   const [iconFailed, setIconFailed] = useState(false);
@@ -73,6 +77,11 @@ export default function MyDemands({ onNavigate, intent }) {
     setFieldErrors((errs) => (errs[k] ? { ...errs, [k]: undefined } : errs));
   };
 
+  const setLocation = (value) => {
+    setForm((f) => ({ ...f, location: value }));
+    setFieldErrors((errs) => (errs.location ? { ...errs, location: undefined } : errs));
+  };
+
   function closeForm() {
     setShowForm(false);
     setFieldErrors({});
@@ -83,12 +92,13 @@ export default function MyDemands({ onNavigate, intent }) {
   async function submit(e) {
     e.preventDefault();
     if (vm.submitting) return;
-    const errs = validate(form);
+    const payload = { ...form, unit: "kg" };
+    const errs = validate(payload);
     setFieldErrors(errs);
     if (Object.keys(errs).length > 0) return;
-    const ok = await vm.createDemand(form);
+    const ok = await vm.createDemand(payload);
     if (ok) {
-      setForm(EMPTY_DEMAND_FORM);
+      setForm(BLANK_FORM);
       setShowForm(false);
       onNavigate?.("demands", null);
     }
@@ -187,7 +197,7 @@ export default function MyDemands({ onNavigate, intent }) {
                 </span>
                 <div>
                   <h3 className="text-[15.5px] font-semibold text-[#16301F]">Create New Requirement</h3>
-                  <p className="mb-3 text-[12.5px] text-gray-500">Fill in the details of the product you need.</p>
+                  <p className="mb-3 text-[12.5px] text-gray-500">Fill in the details of the product you need (per kg).</p>
                 </div>
               </div>
               <button type="button" onClick={closeForm} aria-label="Close" className="rounded-md p-1 text-gray-500 hover:bg-gray-100">
@@ -197,8 +207,7 @@ export default function MyDemands({ onNavigate, intent }) {
 
             <form onSubmit={submit} className="space-y-3" noValidate>
               <Field label="Product Name" required>
-                <input list="product-options" value={form.product} onChange={up("product")} maxLength={60} placeholder="Select or enter product name" className={inputCls + errCls("product")} />
-                <datalist id="product-options">{PRODUCTS.map((p) => <option key={p} value={p} />)}</datalist>
+                <input value={form.product} onChange={up("product")} maxLength={60} placeholder="Enter product name" className={inputCls + errCls("product")} />
                 <FieldError message={fieldErrors.product} />
               </Field>
               <div className="grid grid-cols-2 gap-3">
@@ -207,7 +216,7 @@ export default function MyDemands({ onNavigate, intent }) {
                   <FieldError message={fieldErrors.quantity} />
                 </Field>
                 <Field label="Unit" required>
-                  <select value={form.unit} onChange={up("unit")} className={inputCls + errCls("unit")}>
+                  <select value="kg" onChange={() => {}} className={inputCls + errCls("unit")}>
                     {UNITS.map((u) => <option key={u}>{u}</option>)}
                   </select>
                   <FieldError message={fieldErrors.unit} />
@@ -218,7 +227,7 @@ export default function MyDemands({ onNavigate, intent }) {
                 <FieldError message={fieldErrors.neededDate} />
               </Field>
               <Field label="Location / Delivery Address" required>
-                <input value={form.location} onChange={up("location")} maxLength={100} placeholder="e.g. Pangasinan" className={inputCls + errCls("location")} />
+                <LocationPicker value={form.location} onChange={setLocation} invalid={Boolean(fieldErrors.location)} />
                 <FieldError message={fieldErrors.location} />
               </Field>
               {vm.error && <p className="rounded-lg bg-red-50 p-2.5 text-[12.5px] text-red-700">{vm.error}</p>}

@@ -2,6 +2,7 @@ import { Supply, Demand } from "./farmModels.js";
 import { Match } from "./matchModel.js";
 import { round2 } from "./farmValidation.js";
 import { notify } from "./noticeModel.js";
+import { breakdownFor } from "./demandBreakdown.js";
 
 /* FIFO matching. Supply is allocated oldest-first (createdAt). A match is only
    POTENTIAL (pending_confirmation); the farmer confirms or declines later.
@@ -12,6 +13,9 @@ const SYNCABLE_DEMAND = [...ACTIVE_DEMAND, "matched"];
 const CASE_INSENSITIVE = { locale: "en", strength: 2 };
 const EPS = 0.001;
 const MAX_ACTIVE_LISTINGS = 100; // same cap as supplyRoutes.js
+
+// "expected" supply is a pre-order (harvest not ready yet); "onhand" is ready now.
+const kindOf = (supplyType) => (supplyType === "expected" ? "pre-order, expected harvest" : "on-hand");
 
 /* ---- atomic quantity changes (native driver: pipeline updates, no casting surprises) ---- */
 
@@ -143,11 +147,17 @@ async function allocate(supply, demand, rawQty, opts = {}) {
       availabilityDate: supply.availabilityDate,
       status: "pending_confirmation",
     });
+    const kind = kindOf(supply.supplyType);
     const note = opts.notice || {
       title: "New match request",
-      message: `A buyer needs ${qty} ${supply.unit} of ${supply.product}. Please confirm or decline.`,
+      message: `A buyer needs ${qty} ${supply.unit} of ${supply.product} (${kind}). Open this notification to accept or decline.`,
     };
-    await notify(supply.farmer, "match_created", note.title, note.message);
+    await notify(supply.farmer, "match_created", note.title, note.message, match._id);
+    await notify(
+      demand.buyer, "match_created", "Match found",
+      `A farmer's ${kind} supply matches your request: ${qty} ${supply.unit} of ${supply.product}. Waiting for the farmer to accept.`,
+      match._id
+    );
     return match;
   } catch (err) {
     await releaseSupply(supply._id, qty);
@@ -166,7 +176,7 @@ export async function matchDemand(demandId) {
   if (remaining <= 0) return 0;
 
   const declined = new Set(
-    (await Match.find({ demand: demand._id, status: "declined" }).select("supply").lean())
+    (await Match.find({ demand: demand._id, status: { $in: ["declined", "cancelled"] } }).select("supply").lean())
       .map((m) => String(m.supply))
   );
 
@@ -209,7 +219,7 @@ export async function matchSupply(supplyId) {
   if (remaining <= 0) return 0;
 
   const declined = new Set(
-    (await Match.find({ supply: supply._id, status: "declined" }).select("demand").lean())
+    (await Match.find({ supply: supply._id, status: { $in: ["declined", "cancelled"] } }).select("demand").lean())
       .map((m) => String(m.demand))
   );
 
@@ -254,13 +264,34 @@ export async function confirmMatch(matchId, farmerId) {
   const m = await Match.findOneAndUpdate(
     { _id: matchId, farmer: farmerId, status: "pending_confirmation" },
     { status: "confirmed" },
-    { new: true }
+    { returnDocument: "after" }
   ).lean();
   if (!m) return null;
   await syncDemandStatus(m.demand);
+
+  const demand = await Demand.findById(m.demand).select("quantity status unit product").lean();
+  const sup = await Supply.findById(m.supply).select("supplyType").lean();
+  const kind = kindOf(sup?.supplyType);
+  const b = (await breakdownFor([m.demand])).get(String(m.demand)) || { pending: 0, confirmed: 0 };
+
+  if (demand && demand.status === "matched") {
+    // Every unit is confirmed: the request is complete / pre-ordered.
+    await notify(
+      m.buyer, "match_confirmed", "Requirement matched (pre-ordered)",
+      `Your request for ${demand.quantity} ${demand.unit} of ${demand.product} is fully confirmed by farmers. It is now pre-ordered.`,
+      m._id
+    );
+  } else {
+    await notify(
+      m.buyer, "match_confirmed", "Match confirmed",
+      `A farmer accepted ${m.quantity} ${m.unit} of ${m.product} (${kind}). Confirmed so far: ${b.confirmed} of ${demand ? demand.quantity : m.quantity} ${m.unit}.`,
+      m._id
+    );
+  }
   await notify(
-    m.buyer, "match_confirmed", "Match confirmed",
-    `A farmer confirmed ${m.quantity} ${m.unit} of ${m.product} for your request.`
+    m.farmer, "match_confirmed", "Product pre-ordered",
+    `You accepted ${m.quantity} ${m.unit} of ${m.product} (${kind}). The buyer has pre-ordered it.`,
+    m._id
   );
   return m;
 }
@@ -269,7 +300,7 @@ export async function declineMatch(matchId, farmerId) {
   const m = await Match.findOneAndUpdate(
     { _id: matchId, farmer: farmerId, status: "pending_confirmation" },
     { status: "declined" },
-    { new: true }
+    { returnDocument: "after" }
   ).lean();
   if (!m) return null;
 
@@ -280,9 +311,36 @@ export async function declineMatch(matchId, farmerId) {
 
   await notify(
     m.buyer, "match_declined", "Match declined",
-    `A farmer declined ${m.quantity} ${m.unit} of ${m.product}. FarmLink is looking for the next available supply.`
+    `A farmer declined ${m.quantity} ${m.unit} of ${m.product}. FarmLink is looking for the next available supply.`,
+    m._id
   );
   // and the freed quantity may serve another waiting demand.
+  await matchDemandSafe(m.demand);
+  await matchSupplySafe(m.supply);
+  return m;
+}
+
+// Buyer cancels ONE pending match (the farmer has not answered yet).
+// Supply is released, the request's remaining quantity goes back up, and the
+// engine looks for other supply. The same supply is not offered again.
+export async function cancelMatchByBuyer(matchId, buyerId) {
+  const m = await Match.findOneAndUpdate(
+    { _id: matchId, buyer: buyerId, status: "pending_confirmation" },
+    { status: "cancelled" },
+    { returnDocument: "after" }
+  ).lean();
+  if (!m) return null;
+
+  await releaseSupply(m.supply, m.quantity);
+  await unclaimDemand(m.demand, m.quantity);
+  await retireTargetedSupply(m.supply); // no-op for ordinary supply
+  await syncDemandStatus(m.demand);
+
+  await notify(
+    m.farmer, "match_cancelled", "Match request cancelled",
+    `A buyer cancelled the request for ${m.quantity} ${m.unit} of ${m.product}.`,
+    m._id
+  );
   await matchDemandSafe(m.demand);
   await matchSupplySafe(m.supply);
   return m;
@@ -307,7 +365,7 @@ export async function cancelDemandWithMatches(demandId, buyerId) {
     const m = await Match.findOneAndUpdate(
       { _id: p._id, status: "pending_confirmation" },
       { status: "cancelled" },
-      { new: true }
+      { returnDocument: "after" }
     ).lean();
     if (!m) continue; // the farmer acted first; leave it
     await releaseSupply(m.supply, m.quantity);
@@ -315,7 +373,8 @@ export async function cancelDemandWithMatches(demandId, buyerId) {
     await retireTargetedSupply(m.supply); // no-op for ordinary supply
     await notify(
       m.farmer, "match_cancelled", "Match request cancelled",
-      `A buyer cancelled the request for ${m.quantity} ${m.unit} of ${m.product}.`
+      `A buyer cancelled the request for ${m.quantity} ${m.unit} of ${m.product}.`,
+      m._id
     );
     await matchSupplySafe(m.supply); // freed quantity can serve other demands
   }

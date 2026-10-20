@@ -168,12 +168,7 @@ export default function Home({ onGoToLogin, onGoToSignup }) {
               <ShieldCheck size={15} className="text-[#4CAF50]" />
               FarmLink is for coordination and matching. It does not process payments.
             </p>
-            <p className="mt-3 max-w-xl rounded-xl border border-[#DCE7DC] bg-white/80 px-4 py-2.5 text-[12.5px] leading-relaxed text-gray-600">
-              <strong className="text-[#16301F]">Current status:</strong> account
-              registration and login are available. Supply and demand posting,
-              matching and notifications are still being added.
-            </p>
-          </div>
+                      </div>
 
           <GlassCard opacity={0.8} padding="p-6" className="space-y-5">
             <h2 className="text-[15px] font-semibold text-[#16301F]">FarmLink at a glance</h2>

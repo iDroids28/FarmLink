@@ -16,16 +16,19 @@ import {
   sanitizePassword,
   safeFetchJson,
   getUserMessage,
+  otpSendErrorMessage,
+  OTP_SEND_OPTIONS,
   API_URL,
 } from "./AuthShared";
 
 const RESEND_SECONDS = 60; // wait time before a new OTP can be requested
 
-function postJson(path, body) {
+function postJson(path, body, extraOptions = {}) {
   return safeFetchJson(`${API_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    ...extraOptions,
   });
 }
 
@@ -63,7 +66,7 @@ export default function Forgot({ onGoToLogin }) {
 
   const apiEmail = forgotEmail.trim().toLowerCase();
 
-  /* ---------- Step 1: generate the OTP (shown in the server terminal) ---------- */
+  /* ---------- Step 1: email the OTP ---------- */
   function handleForgotEmailSubmit(e) {
     e.preventDefault();
     setForgotEmailError("");
@@ -73,7 +76,7 @@ export default function Forgot({ onGoToLogin }) {
       return;
     }
     setForgotEmailSubmitting(true);
-    postJson("/forgot/send-otp", { email: apiEmail })
+    postJson("/forgot/send-otp", { email: apiEmail }, OTP_SEND_OPTIONS)
       .then(() => {
         setForgotEmailSubmitting(false);
         setForgotOtp("");
@@ -84,7 +87,7 @@ export default function Forgot({ onGoToLogin }) {
       })
       .catch((err) => {
         setForgotEmailSubmitting(false);
-        setForgotEmailError(getUserMessage(err));
+        setForgotEmailError(otpSendErrorMessage(err));
       });
   }
 
@@ -94,15 +97,16 @@ export default function Forgot({ onGoToLogin }) {
     setForgotOtpError("");
     setOtpInfo("");
     setResending(true);
-    postJson("/forgot/send-otp", { email: apiEmail })
+    postJson("/forgot/send-otp", { email: apiEmail }, OTP_SEND_OPTIONS)
       .then(() => {
         setResending(false);
         setForgotOtp("");
         setResendIn(RESEND_SECONDS);
-        setOtpInfo("If an account exists for this email, a new code has been sent.");      })
+        setOtpInfo("A new code was sent. Check your email inbox and spam folder.");
+      })
       .catch((err) => {
         setResending(false);
-        setForgotOtpError(getUserMessage(err));
+        setForgotOtpError(otpSendErrorMessage(err));
       });
   }
 
@@ -199,12 +203,16 @@ export default function Forgot({ onGoToLogin }) {
         <h1 className="text-xl font-bold mb-1 tracking-tight text-center text-[#1B5E20]">
           Enter OTP
         </h1>
-                <p className="mb-6 text-center text-[13px] text-gray-500">
-          If an account exists for{" "}
-          <span className="font-semibold text-[#2E7D32]">
-            {forgotEmail || "your Gmail"}
+        <p className="mb-1 text-center text-[13px] text-gray-500">
+          We sent a 6-digit code to{" "}
+          <span className="break-all font-semibold text-[#2E7D32]">
+            {forgotEmail || "your email address"}
           </span>
-          , a 6-digit code has been sent. The code expires in 5 minutes.
+          . The code expires in 5 minutes.
+        </p>
+        <p className="mb-5 rounded-lg bg-[#F1F8E9] px-3 py-2 text-center text-[12px] text-[#33691E]">
+          Check your email <b>inbox</b> and <b>spam</b> folder, then type the code here.
+          If no email arrives, you may have entered an email without a FarmLink account.
         </p>
 
         <form onSubmit={handleForgotOtpSubmit} className="w-full space-y-3.5" noValidate>
@@ -291,7 +299,7 @@ export default function Forgot({ onGoToLogin }) {
   /* ================= STEP 1: EMAIL ================= */
   return (
     <Shell>
-      <Header title="Enter your Gmail to reset your password" />
+      <Header title="Enter your email address to reset your password" />
       <form onSubmit={handleForgotEmailSubmit} className="w-full space-y-3.5" noValidate>
         <TextField
           icon={Mail}

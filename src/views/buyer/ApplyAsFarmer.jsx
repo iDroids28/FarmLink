@@ -4,7 +4,7 @@ import StatusNotice from "../../components/StatusNotice.jsx";
 import { PageHeader, Field, StatusBadge, LoadNote, inputCls, primaryBtn, primaryStyle } from "../../components/DemoBits.jsx";
 import { api, useLoad, getUserMessage } from "../../api/farmlinkApi.js";
 
-const EMPTY = { farmName: "", location: "", contact: "", products: "", farmSize: "", description: "" };
+const EMPTY = { farmName: "", location: "", products: "", farmSize: "", description: "" };
 const FIELDS = Object.keys(EMPTY);
 
 const STATUS_TEXT = {
@@ -55,7 +55,6 @@ export default function ApplyAsFarmer({ user, onNavigate, onRefreshUser }) {
     setDone(false);
     if (!form.farmName.trim()) return setError("Please enter your farm name.");
     if (!form.location.trim()) return setError("Please enter your farm location.");
-    if (!form.contact.trim()) return setError("Please enter your contact number.");
     if (!form.products.trim()) return setError("Please list the products you sell.");
     setBusy(true);
     api
@@ -138,9 +137,6 @@ export default function ApplyAsFarmer({ user, onNavigate, onRefreshUser }) {
             </Field>
             <Field label="Farm Location" required>
               <input value={form.location} onChange={up("location")} placeholder="e.g. Dagupan, Pangasinan" className={inputCls} />
-            </Field>
-            <Field label="Contact Number" required>
-              <input value={form.contact} onChange={up("contact")} placeholder="09XXXXXXXXX" className={inputCls} />
             </Field>
             <Field label="Farm Size (hectares)">
               <input type="number" min="0" value={form.farmSize} onChange={up("farmSize")} placeholder="e.g. 2" className={inputCls} />

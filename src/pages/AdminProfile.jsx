@@ -71,12 +71,11 @@ export default function AdminProfile({ onRefreshUser }) {
         fields={[
           { key: "name", label: "Full Name" },
           { key: "email", label: "Email Address", readOnly: true },
-          { key: "phone", label: "Contact Number", type: "tel", placeholder: "0917 123 0000" },
           { key: "address", label: "Address" },
         ]}
-        values={{ name: user.name, email: user.email, phone: profile.phone, address: profile.address }}
+        values={{ name: user.name, email: user.email, address: profile.address }}
         onSave={async (d) => {
-          await save({ name: d.name, phone: d.phone, address: d.address });
+          await save({ name: d.name, address: d.address });
           onRefreshUser?.();
         }}
       />

@@ -88,7 +88,7 @@ function sectionsFor(a) {
         title: "Farm information",
         items: [
           ["Farm Location", a.farmLocation],
-          ["Type of Farming", a.farmingType],
+          ...(a.farmingType ? [["Type of Farming", a.farmingType]] : []),
           ["Main Agricultural Products/Crops", a.products],
           ["Farmer Status", a.farmerStatus === "Other" && a.farmerStatusCustom ? `Other: ${a.farmerStatusCustom}` : a.farmerStatus],
         ],

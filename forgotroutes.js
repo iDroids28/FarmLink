@@ -3,11 +3,22 @@ import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
 import { otpLimiter } from "./security.js";
 import { SAFE_MESSAGES, respondWithSafeError } from "./safeErrors.js";
+import {
+  sendPasswordResetOtpEmail,
+  checkEmailConfig,
+  describeMailError,
+  acquireSendLock,
+  releaseSendLock,
+  isValidEmailAddress,
+  EMAIL_SEND_FAILED_BODY,
+} from "./emailService.js";
 
 /* ---------------- EMAIL VALIDATION ---------------- */
 
+// Legacy export name retained because server.js imports isGmail. It now accepts
+// any valid recipient domain and shares the same validation as emailService.js.
 export function isGmail(email) {
-  return /^[a-zA-Z0-9._%+-]+@gmail\.com$/.test(email);
+  return isValidEmailAddress(typeof email === "string" ? email.trim() : email);
 }
 
 /* ---------------- PASSWORD VALIDATION ----------------
@@ -47,37 +58,8 @@ function otpMatches(input, expected) {
   return crypto.timingSafeEqual(Buffer.from(input), Buffer.from(expected));
 }
 
-/* ---------------- OTP DELIVERY ----------------
-   If SMTP_HOST (+ SMTP_USER / SMTP_PASS / SMTP_FROM) is set in .env the OTP
-   is e-mailed with nodemailer. Without SMTP, the OTP is printed in the server
-   terminal ONLY in development. In production nothing is printed. */
-
 async function deliverOtp(email, otp) {
-  if (process.env.SMTP_HOST) {
-    const nodemailer = (await import("nodemailer")).default;
-    const transport = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: Number(process.env.SMTP_PORT) === 465,
-      auth: process.env.SMTP_USER
-        ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-        : undefined,
-    });
-    await transport.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: email,
-      subject: "Your FarmLink password reset code",
-      text: `Your FarmLink verification code is ${otp}. It expires in 5 minutes. If you did not request it, you can ignore this email.`,
-    });
-    return;
-  }
-  if (process.env.NODE_ENV !== "production") {
-    console.log("=================================================");
-    console.log(`DEV ONLY - OTP for ${email}: ${otp}`);
-    console.log("=================================================");
-  } else {
-    console.error("OTP not delivered: configure SMTP_* in .env for production.");
-  }
+  await sendPasswordResetOtpEmail(email, otp, OTP_TTL_MS / 60000);
 }
 
 /* ---------------- FORGOT PASSWORD ROUTER ---------------- */
@@ -89,7 +71,9 @@ export default function createForgotRouter({ User }) {
   // Remove expired codes so the Map can't grow forever.
   setInterval(() => {
     const now = Date.now();
-    for (const [key, rec] of otpStore) if (now > rec.expiresAt) otpStore.delete(key);
+    for (const [key, rec] of otpStore) {
+      if (now > rec.expiresAt) otpStore.delete(key);
+    }
   }, 60 * 1000).unref();
 
   // Shared check used by verify + reset. Returns an error response or null.
@@ -118,39 +102,65 @@ export default function createForgotRouter({ User }) {
       const cleanEmail = cleanEmailValue(req.body?.email);
       if (!cleanEmail) return res.status(400).json({ error: "Email is required." });
       if (!isGmail(cleanEmail)) {
-        return res.status(400).json({ error: "Please enter a valid Gmail address." });
+        return res.status(400).json({ error: "Please enter a valid email address." });
       }
 
-      // Same answer whether or not the account exists (no user enumeration).
+      // If global mail configuration is missing, all email addresses receive
+      // the same configuration error; no account lookup is needed first.
+      const config = checkEmailConfig();
+      if (!config.ok) {
+        console.error("[email] Cannot send password-reset OTP:", config.problems.join("; "));
+        return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+      }
+
+      // Keep the normal success response identical for existing/non-existing accounts.
       const genericResponse = {
         message: "If an account exists for that email, an OTP has been sent.",
       };
-
       const user = await User.findOne({ email: cleanEmail });
       if (!user) return res.json(genericResponse);
 
-      // Cooldown: ignore repeat requests inside 60s (still the same response).
       const existing = otpStore.get(cleanEmail);
       if (existing && Date.now() - existing.sentAt < OTP_RESEND_MS) {
         return res.json(genericResponse);
       }
 
-      const otp = crypto.randomInt(100000, 1000000).toString(); // CSPRNG
-      otpStore.set(cleanEmail, {
-        otp,
-        sentAt: Date.now(),
-        expiresAt: Date.now() + OTP_TTL_MS,
-        attempts: 0,
-      });
-
-      try {
-        await deliverOtp(cleanEmail, otp);
-      } catch (mailErr) {
-        // Log it, but keep the generic answer so nothing leaks to the client.
-        console.error("OTP delivery error:", mailErr);
+      const lockKey = `forgot:${cleanEmail}`;
+      const lockToken = acquireSendLock(lockKey);
+      if (!lockToken) {
+        return res.status(429).json({
+          error: "A code request is already being processed. Please try again shortly.",
+        });
       }
 
-      return res.json(genericResponse);
+      try {
+        const otp = crypto.randomInt(100000, 1000000).toString();
+        const previous = otpStore.get(cleanEmail);
+        const entry = {
+          otp,
+          sentAt: Date.now(),
+          expiresAt: Date.now() + OTP_TTL_MS,
+          attempts: 0,
+        };
+
+        // Store first so an email that has been sent is immediately verifiable.
+        otpStore.set(cleanEmail, entry);
+        try {
+          await deliverOtp(cleanEmail, otp);
+        } catch (mailErr) {
+          console.error("Password reset email failed:", describeMailError(mailErr));
+          // Roll back only if another request hasn't replaced this entry.
+          if (otpStore.get(cleanEmail) === entry) {
+            if (previous) otpStore.set(cleanEmail, previous);
+            else otpStore.delete(cleanEmail);
+          }
+          return res.status(503).json({ ...EMAIL_SEND_FAILED_BODY });
+        }
+
+        return res.json(genericResponse);
+      } finally {
+        releaseSendLock(lockKey, lockToken);
+      }
     } catch (err) {
       respondWithSafeError(res, err, "Send OTP error", SAFE_MESSAGES.unprocessed);
     }
@@ -188,7 +198,7 @@ export default function createForgotRouter({ User }) {
 
       // New password + clear lockout + tokenVersion bump (logs out every
       // device that still holds an old session token).
-      await User.findOneAndUpdate(
+      const updatedUser = await User.findOneAndUpdate(
         { email: cleanEmail },
         {
           password: passwordHash,
@@ -198,6 +208,9 @@ export default function createForgotRouter({ User }) {
           $inc: { tokenVersion: 1 },
         }
       );
+      if (!updatedUser) {
+        return res.status(400).json({ error: "OTP not found or expired." });
+      }
 
       otpStore.delete(cleanEmail);
       res.json({ message: "Password reset successfully." });
