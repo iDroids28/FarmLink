@@ -1,17 +1,16 @@
-import nodemailer from "nodemailer";
+const BREVO_API_URL = "https://api.brevo.com/v3/smtp/email";
+const MAIL_SEND_TIMEOUT_MS = 30_000;
 
 export const EMAIL_SEND_FAILED_MESSAGE =
   "We couldn't send the verification email right now. Please try again in a moment.";
+
 export const EMAIL_SEND_FAILED_BODY = {
   error: EMAIL_SEND_FAILED_MESSAGE,
   code: "EMAIL_SEND_FAILED",
 };
 
-const MAIL_SEND_TIMEOUT_MS = 30_000;
-const PLACEHOLDER_RE = /your-group-gmail|your-google-app-password|change-me|example\.com/i;
-// Sender must be Gmail because Gmail SMTP authenticates this address.
-const EMAIL_RE = /^[^\s@<>"',;]+@gmail\.com$/i;
-// Recipient addresses must match the same format accepted by src/AuthShared.js.
+// Match the email format used by src/AuthShared.js, including domains such as
+// phinmaed.com. This validates the format, not whether the mailbox exists.
 const EMAIL_ADDRESS_RE =
   /^(?=[^@]{1,64}@)[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$/;
 
@@ -32,77 +31,79 @@ export class EmailConfigError extends Error {
   }
 }
 
-function extractSenderAddress(from) {
-  const angleAddress = String(from || "").match(/<\s*([^<>]+?)\s*>\s*$/);
-  return (angleAddress ? angleAddress[1] : String(from || "")).trim();
-}
-
-// Read config at call time so dotenv/import order does not change behavior.
+// Read environment variables when called, not during module import.
+// Never log or return the API key itself.
 function readConfig() {
-  const host = (process.env.SMTP_HOST || "").trim();
-  const port = Number(process.env.SMTP_PORT || 587);
-  const user = (process.env.SMTP_USER || "").trim().toLowerCase();
-  // Google displays App Passwords with spaces; spaces are not part of the secret.
-  const pass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
-  const from = (process.env.SMTP_FROM || "").trim() || user;
-  const senderAddress = extractSenderAddress(from).toLowerCase();
+  const apiKey = (process.env.BREVO_API_KEY || "").trim();
+  const senderEmail = (process.env.BREVO_SENDER_EMAIL || "")
+    .trim()
+    .toLowerCase();
+  const senderName = (process.env.BREVO_SENDER_NAME || "FarmLink").trim();
 
   const problems = [];
-  if (host.toLowerCase() !== "smtp.gmail.com") {
-    problems.push("SMTP_HOST must be smtp.gmail.com");
-  }
-  if (port !== 587) {
-    problems.push("SMTP_PORT must be 587 (STARTTLS)");
-  }
-  if (!EMAIL_RE.test(user) || PLACEHOLDER_RE.test(user)) {
-    problems.push("SMTP_USER must be a real Gmail address");
-  }
-  if (!/^[a-zA-Z0-9]{16}$/.test(pass) || PLACEHOLDER_RE.test(pass)) {
-    problems.push("SMTP_PASS must be a 16-character Google App Password");
-  }
+
   if (
-    !from || /[\r\n]/.test(from) || !EMAIL_RE.test(senderAddress) ||
-    senderAddress !== user || PLACEHOLDER_RE.test(from)
+    !apiKey ||
+    /^(your-brevo-api-key|replace-with-your-api-key|change-me|placeholder)$/i.test(
+      apiKey,
+    )
   ) {
-    problems.push("SMTP_FROM must use the authenticated Gmail sender address");
+    problems.push(
+      "BREVO_API_KEY must be configured with your Brevo API key",
+    );
   }
 
-  return { host, port, user, pass, from, problems };
+  if (!isValidEmailAddress(senderEmail)) {
+    problems.push("BREVO_SENDER_EMAIL must be a valid email address");
+  }
+
+  if (!senderName || /[\r\n]/.test(senderName) || senderName.length > 100) {
+    problems.push("BREVO_SENDER_NAME must be a valid sender name");
+  }
+
+  return { apiKey, senderEmail, senderName, problems };
 }
 
-/** Returns config status without exposing SMTP credentials. */
+/** Returns configuration status without exposing credentials. */
 export function checkEmailConfig() {
   const { problems } = readConfig();
   return { ok: problems.length === 0, problems };
 }
 
-/** Log-safe SMTP error: no raw message, recipient, OTP, or credential values. */
+/** Safe diagnostic summary; do not log raw provider messages or credentials. */
 export function describeMailError(err) {
   if (err instanceof EmailConfigError) {
     return `Email configuration error: ${err.problems.join("; ")}`;
   }
-  const name = typeof err?.name === "string" ? err.name : "Error";
-  const code = typeof err?.code === "string" ? err.code.slice(0, 40) : "-";
-  const responseCode = Number.isFinite(Number(err?.responseCode))
-    ? String(Number(err.responseCode))
+
+  const name =
+    typeof err?.name === "string" ? err.name.slice(0, 40) : "Error";
+  const code =
+    typeof err?.code === "string" ? err.code.slice(0, 40) : "-";
+  const statusCode = Number.isInteger(Number(err?.statusCode))
+    ? String(Number(err.statusCode))
     : "-";
-  return `SMTP delivery failed (name=${name.slice(0, 40)}, code=${code}, responseCode=${responseCode})`;
+
+  return `Brevo delivery failed (name=${name}, code=${code}, status=${statusCode})`;
 }
 
-function createTransport(cfg) {
-  return nodemailer.createTransport({
-    host: cfg.host,
-    port: 587,
-    secure: false,      // STARTTLS, not implicit TLS
-    requireTLS: true,   // fail if STARTTLS is unavailable
-    auth: { user: cfg.user, pass: cfg.pass },
-    connectionTimeout: 10_000,
-    greetingTimeout: 10_000,
-    socketTimeout: 20_000,
-  });
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
-async function sendOtpEmail({ to, subject, heading, code, minutes, footer }) {
+async function sendOtpEmail({
+  to,
+  subject,
+  heading,
+  code,
+  minutes,
+  footer,
+}) {
   if (
     typeof to !== "string" ||
     !isValidEmailAddress(to.trim()) ||
@@ -110,64 +111,83 @@ async function sendOtpEmail({ to, subject, heading, code, minutes, footer }) {
   ) {
     throw new Error("Invalid recipient address");
   }
+
   if (!/^\d{6}$/.test(String(code))) {
     throw new Error("Invalid OTP format");
   }
 
-  const cfg = readConfig();
-  if (cfg.problems.length) throw new EmailConfigError(cfg.problems);
-
-  const transport = createTransport(cfg);
-  let timeoutId;
-  try {
-    const text =
-      `${heading}\n\nYour FarmLink verification code is: ${code}\n\n` +
-      `It expires in ${minutes} minutes. ${footer}`;
-    const html = `
-      <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:24px;color:#333">
-        <h2 style="color:#2E7D32;margin:0 0 12px">FarmLink</h2>
-        <p>${heading}</p>
-        <p style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#2E7D32;margin:16px 0">${code}</p>
-        <p style="font-size:13px;color:#666">It expires in ${minutes} minutes. ${footer}</p>
-        <p style="font-size:12px;color:#777">Never share this code with anyone.</p>
-      </div>`;
-
-    const sendPromise = transport.sendMail({
-      from: cfg.from,
-      to: to.trim().toLowerCase(),
-      subject,
-      text,
-      html,
-    });
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => {
-        const err = new Error("SMTP delivery timed out");
-        err.code = "SMTP_SEND_TIMEOUT";
-        reject(err);
-      }, MAIL_SEND_TIMEOUT_MS);
-    });
-    const info = await Promise.race([sendPromise, timeoutPromise]);
-
-    // This email has a single recipient. Nodemailer must report at least one
-    // accepted recipient and no rejected/pending recipients.
-    const accepted = Array.isArray(info?.accepted) ? info.accepted : [];
-    const rejected = Array.isArray(info?.rejected) ? info.rejected : [];
-    const pending = Array.isArray(info?.pending) ? info.pending : [];
-    if (accepted.length < 1 || rejected.length > 0 || pending.length > 0) {
-      const err = new Error("SMTP recipient was not accepted");
-      err.code = "SMTP_RECIPIENT_NOT_ACCEPTED";
-      throw err;
-    }
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-    // A fresh transport is used per low-volume OTP email, so it can be closed
-    // safely without interrupting another recipient's send in this process.
-    try {
-      transport.close();
-    } catch {
-      // Do not mask the original delivery result/error during cleanup.
-    }
+  const expiryMinutes = Number(minutes);
+  if (!Number.isFinite(expiryMinutes) || expiryMinutes <= 0) {
+    throw new Error("Invalid OTP expiration time");
   }
+
+  const cfg = readConfig();
+
+  if (cfg.problems.length > 0) {
+    throw new EmailConfigError(cfg.problems);
+  }
+
+  const safeHeading = escapeHtml(heading);
+  const safeFooter = escapeHtml(footer);
+  const safeCode = escapeHtml(code);
+  const safeMinutes = escapeHtml(expiryMinutes);
+
+  const htmlContent = `
+    <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:24px;color:#333">
+      <h2 style="color:#2E7D32;margin:0 0 12px">FarmLink</h2>
+      <p>${safeHeading}</p>
+      <p style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#2E7D32;margin:16px 0">${safeCode}</p>
+      <p style="font-size:13px;color:#666">It expires in ${safeMinutes} minutes. ${safeFooter}</p>
+      <p style="font-size:12px;color:#777">Never share this code with anyone.</p>
+    </div>
+  `;
+
+  let response;
+
+  try {
+    response = await fetch(BREVO_API_URL, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "api-key": cfg.apiKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        sender: {
+          name: cfg.senderName,
+          email: cfg.senderEmail,
+        },
+        to: [{ email: to.trim().toLowerCase() }],
+        subject,
+        htmlContent,
+      }),
+      signal: AbortSignal.timeout(MAIL_SEND_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const wrappedError = new Error("Could not reach the email provider");
+
+    wrappedError.code =
+      err?.name === "TimeoutError" || err?.name === "AbortError"
+        ? "BREVO_SEND_TIMEOUT"
+        : "BREVO_NETWORK_ERROR";
+
+    throw wrappedError;
+  }
+
+  if (!response.ok) {
+    const err = new Error(
+      "Brevo rejected the transactional email request",
+    );
+
+    err.code = "BREVO_API_ERROR";
+    err.statusCode = response.status;
+
+    throw err;
+  }
+
+  // A successful API response means the request was accepted by Brevo.
+  // It does not guarantee inbox delivery.
+  return undefined;
 }
 
 export function sendSignupOtpEmail(to, code, minutes = 10) {
@@ -198,8 +218,10 @@ export function sendLoginOtpEmail(to, code, minutes = 10) {
     code,
     minutes,
     subject: "Your FarmLink login verification code",
-    heading: "Enter this code to finish signing in to your FarmLink account.",
-    footer: "If you did not try to log in, change your password and secure your account.",
+    heading:
+      "Enter this code to finish signing in to your FarmLink account.",
+    footer:
+      "If you did not try to log in, change your password and secure your account.",
   });
 }
 
@@ -209,20 +231,28 @@ export function sendPasswordChangeOtpEmail(to, code, minutes = 10) {
     code,
     minutes,
     subject: "Confirm your FarmLink password change",
-    heading: "Enter this code to confirm the password change you requested.",
-    footer: "If you did not request a password change, do not enter this code and secure your account.",
+    heading:
+      "Enter this code to confirm the password change you requested.",
+    footer:
+      "If you did not request a password change, do not enter this code and secure your account.",
   });
 }
 
-// In-process locks prevent duplicate sends from concurrent requests in this
-// server instance. The caller must always release using the matching token.
+// In-process locks prevent duplicate sends from concurrent requests
+// in this server instance. The caller must release using the matching token.
 const locks = new Map();
+
 export function acquireSendLock(key) {
   if (locks.has(key)) return null;
+
   const token = Symbol(key);
   locks.set(key, token);
+
   return token;
 }
+
 export function releaseSendLock(key, token) {
-  if (locks.get(key) === token) locks.delete(key);
+  if (locks.get(key) === token) {
+    locks.delete(key);
+  }
 }
