@@ -36,7 +36,8 @@ export function setAuthCookie(res, token, remember = false) {
   const options = {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
+    sameSite:
+  process.env.NODE_ENV === "production" ? "none" : "lax",
   };
   if (remember) options.maxAge = REMEMBER_MS;
   res.cookie(COOKIE_NAME, token, options);
