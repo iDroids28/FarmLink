@@ -39,6 +39,8 @@ const supplySchema = new mongoose.Schema(
     availableQuantity: { type: Number, min: 0, default: 0 },
     unit: { type: String, enum: UNITS, required: true },
     availabilityDate: { type: Date, required: true },
+    // On-hand listings expire by date; expected harvest uses availabilityDate.
+    expiresAt: { type: Date, default: null, index: true },
     location: { type: String, required: true, trim: true, maxlength: 120 },
     status: { type: String, enum: SUPPLY_STATUSES, default: "available" },
     // Set only for a request-specific offer. Ordinary supply never has it (null/missing).

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Plus, Search, Pencil, Eye, UploadCloud, X, Info, Trash2, Sprout, CheckCircle2, CalendarDays, MapPin, Package, Save, Star } from "lucide-react";
+import { Plus, Search, Pencil, Eye, UploadCloud, X, Info, Trash2, Sprout, CheckCircle2, CalendarDays, MapPin, Package, Save, Star, ZoomIn } from "lucide-react";
 import EmptyState from "../../components/EmptyState.jsx";
 import { LoadNote, inputCls } from "../../components/DemoBits.jsx";
 import { Notice, formatDate, formatQty } from "../../components/FormBits.jsx";
@@ -8,14 +8,24 @@ import LocationPicker from "../../components/LocationPicker.jsx";
 import ReviewsModal, { Stars } from "../../components/ReviewsModal.jsx";
 import { supplyApi, fileToDataUrl } from "../../api/supplyApi.js";
 
-const CATEGORIES = ["Vegetables", "Fruits", "Rice"];
-const UNITS = ["kg"];
-const EMPTY = { product: "", category: "", pricePerUnit: "", unit: "kg", supplyType: "onhand", quantity: "", location: "", availabilityDate: "", description: "", image: "" };
+const CATEGORIES = [
+  "Vegetables", "Fruits", "Rice", "Corn & Grains", "Root Crops", "Legumes & Beans",
+  "Herbs & Spices", "Mushrooms", "Coconut Products", "Coffee & Cacao", "Sugarcane",
+  "Dairy & Milk", "Eggs", "Livestock", "Poultry", "Meat", "Fish & Seafood",
+  "Honey & Bee Products", "Seeds & Seedlings", "Flowers & Ornamental Plants",
+  "Fiber Crops", "Farm By-products", "Other Farm Products",
+];
+const UNITS = ["kg", "ton", "sack", "crate", "piece", "bundle", "ml", "liter", "gal", "bottle", "tray", "dozen"];
+const EMPTY = { product: "", category: "", pricePerUnit: "", unit: "kg", supplyType: "onhand", quantity: "", location: "", availabilityDate: "", expiresAt: "", description: "", image: "" };
 const PAGE_SIZE = 8;
 
 // Pending (amber), Available with count (green), Out of Stock (red), Rejected (red).
 function stockInfo(s) {
   const a = s.approvalStatus || "approved";
+  const expiryKey = s.expiresAt ? dateKeyForSupply(s.expiresAt) : (s.createdAt ? addDaysISO(dateKeyForSupply(s.createdAt), 4) : "");
+  if (s.status === "expired" || (s.supplyType === "onhand" && expiryKey && expiryKey < todayLocal() && Number(s.reservedQuantity || 0) <= 0)) {
+    return { key: "expired", label: "Expired", cls: "bg-gray-100 text-gray-700" };
+  }
   if (a === "pending") return { key: "pending", label: "Pending approval", cls: "bg-amber-100 text-amber-800" };
   if (a === "rejected") return { key: "rejected", label: "Rejected", cls: "bg-red-100 text-red-700" };
   if (Number(s.availableQuantity) > 0) {
@@ -28,6 +38,21 @@ function stockInfo(s) {
 function todayLocal() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function dateKeyForSupply(value) {
+  if (!value) return "";
+  return String(value).slice(0, 10);
+}
+function addDaysISO(value, days) {
+  const [year, month, day] = value.split("-").map(Number);
+  const d = new Date(year, month - 1, day);
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function dateInputValue(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value.slice(0, 10);
+  return new Date(value).toISOString().slice(0, 10);
 }
 
 function Label({ children, required }) {
@@ -42,17 +67,38 @@ function Title({ children, sub }) {
   );
 }
 
-function Photo({ src, alt, children }) {
+function Photo({ src, alt, children, onDoubleClick }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => { setFailed(false); }, [src]);
   return (
-    <div className="relative h-40 w-full overflow-hidden bg-[#E8F5E9]">
+    <div
+      className={"relative h-40 w-full overflow-hidden bg-[#E8F5E9] " + (src ? "cursor-zoom-in" : "")}
+      onDoubleClick={src ? onDoubleClick : undefined}
+      title={src ? "Double-click to enlarge the product image" : undefined}
+    >
       {src && !failed ? (
         <img src={src} alt={alt} onError={() => setFailed(true)} className="h-full w-full object-cover" />
       ) : (
         <div className="flex h-full items-center justify-center text-[#2E7D32]"><Sprout size={40} /></div>
       )}
+      {src && <div className="pointer-events-none absolute bottom-2 right-2 flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-[10px] font-medium text-white"><ZoomIn size={12} /> Double-click to zoom</div>}
       {children}
+    </div>
+  );
+}
+
+function ImageLightbox({ src, alt, onClose }) {
+  useEffect(() => {
+    if (!src) return undefined;
+    const onKeyDown = (event) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [src, onClose]);
+  if (!src) return null;
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/85 p-3 sm:p-8" role="dialog" aria-modal="true" aria-label="Product image preview" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <button type="button" onClick={onClose} aria-label="Close image preview" className="absolute right-4 top-4 rounded-full bg-white/15 p-2.5 text-white transition hover:bg-white/25"><X size={22} /></button>
+      <img src={src} alt={alt || "Enlarged product"} className="max-h-[90vh] max-w-full rounded-xl object-contain shadow-2xl" />
     </div>
   );
 }
@@ -75,17 +121,25 @@ function RatingChip({ rating, onClick }) {
 /* ---------------- Add / Edit product page ---------------- */
 function ProductForm({ initial, onBack, onSaved }) {
   const editing = Boolean(initial?.id);
-  const [f, setF] = useState(initial ? {
-    product: initial.product || "", category: CATEGORIES.includes(initial.category) ? initial.category : "", pricePerUnit: String(initial.pricePerUnit ?? ""),
-    unit: "kg", supplyType: initial.supplyType || "onhand", quantity: String(initial.quantity ?? ""),
-    location: initial.location || "", availabilityDate: initial.supplyType === "expected" ? (initial.availabilityDate || "") : "",
-    description: initial.description || "", image: initial.image || "",
-  } : EMPTY);
+  const [f, setF] = useState(() => {
+    const today = todayLocal();
+    const maxExpiry = addDaysISO(today, 4);
+    const storedExpiry = dateInputValue(initial?.expiresAt);
+    const expiresAt = storedExpiry && storedExpiry >= today && storedExpiry <= maxExpiry ? storedExpiry : maxExpiry;
+    return initial ? {
+      product: initial.product || "", category: CATEGORIES.includes(initial.category) ? initial.category : "", pricePerUnit: String(initial.pricePerUnit ?? ""),
+      unit: UNITS.includes(initial.unit) ? initial.unit : "kg", supplyType: initial.supplyType || "onhand", quantity: String(initial.quantity ?? ""),
+      location: initial.location || "", availabilityDate: dateInputValue(initial.availabilityDate), expiresAt,
+      description: initial.description || "", image: initial.image || "",
+    } : { ...EMPTY, expiresAt };
+  });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [zoomImage, setZoomImage] = useState("");
   const fileRef = useRef(null);
   const expected = f.supplyType === "expected";
   const today = todayLocal();
+  const maxOnHandExpiry = addDaysISO(today, 4);
   const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }));
 
   async function pick(file) {
@@ -98,16 +152,18 @@ function ProductForm({ initial, onBack, onSaved }) {
     e.preventDefault();
     if (busy) return;
     setError("");
-    if (f.product.trim().length < 2) return setError("Enter a product name.");
-    if (!f.category) return setError("Select a category.");
+    if (!/^\p{L}{2,60}$/u.test(f.product)) return setError("Product name must contain letters only, with no spaces, numbers, or symbols.");
+    if (!CATEGORIES.includes(f.category)) return setError("Select a valid farm-product category.");
     if (!(Number(f.pricePerUnit) > 0)) return setError("Enter a price greater than 0.");
-    if (!(Number(f.quantity) > 0)) return setError("Enter a quantity greater than 0.");
+    if (!Number.isFinite(Number(f.quantity)) || Number(f.quantity) < 10) return setError(`Minimum quantity is 10 ${f.unit}.`);
+    if (!UNITS.includes(f.unit)) return setError("Select a valid unit.");
     if (!f.location) return setError("Select a location.");
     if (expected && (!f.availabilityDate || f.availabilityDate < today)) return setError("Select a harvest date (today or later).");
+    if (!expected && (!f.expiresAt || f.expiresAt < today || f.expiresAt > maxOnHandExpiry)) return setError("Choose an expiry date from today up to 4 days from today.");
     if (!f.image) return setError("Upload a product image.");
     setBusy(true);
     try {
-      const body = { ...f, unit: "kg", availabilityDate: expected ? f.availabilityDate : today, image: f.image === initial?.image ? undefined : f.image };
+      const body = { ...f, availabilityDate: expected ? f.availabilityDate : today, expiresAt: expected ? "" : f.expiresAt, image: f.image === initial?.image ? undefined : f.image };
       if (editing) await supplyApi.update(initial.id, body); else await supplyApi.create(body);
       onSaved(editing ? "Product updated. It is waiting for admin approval again." : "Product uploaded. It is Pending approval and will appear to buyers once the admin approves it.");
     } catch (err) { setError(err.message); setBusy(false); }
@@ -124,16 +180,17 @@ function ProductForm({ initial, onBack, onSaved }) {
   }
 
   return (
-    <div className="space-y-4">
-      <button type="button" onClick={onBack} className="flex items-center gap-1 text-[12.5px] text-gray-600 hover:text-[#16301F]"><ArrowLeft size={14} /> Back to My Supply</button>
-      <Title sub="Share your fresh and quality agricultural products with buyers in your community.">{editing ? "Edit Product" : "Add Product"}</Title>
+    <div className="space-y-5">
+      <div className="rounded-2xl border border-[#D8E8D4] bg-gradient-to-r from-[#F2FAF0] to-white px-5 py-4 shadow-sm sm:px-6">
+        <Title sub="Share fresh, quality farm products with buyers. Keep the product name simple and the quantity and expiry accurate.">{editing ? "Edit Product" : "Add Product"}</Title>
+      </div>
 
-      <form onSubmit={submit} noValidate className="rounded-2xl border border-black/5 bg-white p-5 shadow-sm">
+      <form onSubmit={submit} noValidate className="rounded-2xl border border-[#E0EAE0] bg-white p-5 shadow-[0_10px_30px_rgba(22,48,31,0.05)] sm:p-6">
         <div className="grid gap-6 lg:grid-cols-[1fr_330px]">
           <div className="space-y-4">
             <h3 className="text-[15px] font-bold text-[#16301F]">Product Information</h3>
             <div className="grid gap-3 sm:grid-cols-2">
-              <div><Label required>Product Name</Label><input value={f.product} onChange={set("product")} maxLength={60} placeholder="e.g. Tomatoes" className={inputCls} /></div>
+              <div><Label required>Product Name</Label><input value={f.product} onChange={(e) => setF((x) => ({ ...x, product: e.target.value.replace(/[^\p{L}]/gu, "").slice(0, 60) }))} maxLength={60} autoComplete="off" placeholder="e.g. Mango" className={inputCls} aria-describedby="product-name-help" /><p id="product-name-help" className="mt-1 text-[11px] text-gray-500">Letters only. Spaces, numbers, and symbols are not allowed.</p></div>
               <div><Label required>Category</Label>
                 <select value={f.category} onChange={set("category")} className={inputCls}><option value="">Select category</option>{CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
               <div><Label required>Price per Unit</Label>
@@ -141,15 +198,15 @@ function ProductForm({ initial, onBack, onSaved }) {
                   <span className="text-[14px] text-gray-500">₱</span>
                   <input type="number" min="0" step="any" value={f.pricePerUnit} onChange={set("pricePerUnit")} placeholder="0.00" className="w-full bg-transparent px-2 py-2.5 text-[14px] outline-none" />
                 </div></div>
-              <div><Label>&nbsp;</Label>
-                <select value="kg" onChange={() => {}} className={inputCls}>{UNITS.map((u) => <option key={u} value={u}>per {u}</option>)}</select></div>
+              <div><Label required>Unit / Price Basis</Label>
+                <select value={f.unit} onChange={set("unit")} className={inputCls}>{UNITS.map((u) => <option key={u} value={u}>per {u}</option>)}</select></div>
             </div>
 
             <div><Label required>Supply Type</Label>
               <div className="flex gap-2">
                 {[["onhand", "On Hand", CheckCircle2], ["expected", "Expected Harvest", Sprout]].map(([id, label, Icon]) => (
-                  <button key={id} type="button" onClick={() => setF((x) => ({ ...x, supplyType: id }))}
-                    className={"flex items-center gap-2 rounded-lg border px-4 py-2 text-[13px] font-semibold " + (f.supplyType === id ? "border-[#1B5E20] bg-[#1B5E20] text-white" : "border-gray-200 bg-white text-gray-700")}>
+                  <button key={id} type="button" onClick={() => setF((x) => ({ ...x, supplyType: id, expiresAt: id === "onhand" ? (x.expiresAt && x.expiresAt >= today && x.expiresAt <= maxOnHandExpiry ? x.expiresAt : maxOnHandExpiry) : x.expiresAt }))}
+                    className={"flex items-center gap-2 rounded-lg border px-4 py-2 text-[13px] font-semibold transition " + (f.supplyType === id ? "border-[#1B5E20] bg-[#1B5E20] text-white shadow-sm" : "border-gray-200 bg-white text-gray-700 hover:border-[#9CC89A]")}>
                     <Icon size={15} /> {label}
                   </button>
                 ))}
@@ -159,16 +216,16 @@ function ProductForm({ initial, onBack, onSaved }) {
             <div className="grid gap-3 sm:grid-cols-2">
               <div><Label required>Quantity</Label>
                 <div className="flex gap-2">
-                  <input type="number" min="0" step="any" value={f.quantity} onChange={set("quantity")} placeholder="Enter quantity" className={inputCls} />
-                  <select value="kg" onChange={() => {}} className={inputCls + " !w-24"}>{UNITS.map((u) => <option key={u}>{u}</option>)}</select>
-                </div></div>
+                  <input type="number" min="10" step="any" value={f.quantity} onChange={set("quantity")} placeholder="Minimum 10" className={inputCls} />
+                  <span className="inline-flex min-w-20 items-center justify-center rounded-xl border border-[#DCE8D8] bg-[#F4F9F2] px-3 text-sm font-semibold text-[#2E7D32]">{f.unit}</span>
+                </div><p className="mt-1 text-[11.5px] text-gray-500">Minimum quantity: 10 {f.unit}.</p></div>
               <div><Label required>Location</Label><LocationPicker value={f.location} onChange={(v) => setF((x) => ({ ...x, location: v }))} /></div>
-              <div><Label required={expected}>{expected ? "Harvest Date" : "Available Since"}</Label>
+              <div><Label required>{expected ? "Harvest Date" : "Expiry Date"}</Label>
                 <div className="relative">
                   <CalendarDays size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-                  <input type="date" min={today} disabled={!expected} value={expected ? f.availabilityDate : today} onChange={set("availabilityDate")} className={inputCls + " !pl-9" + (expected ? "" : " opacity-60")} />
+                  <input type="date" min={today} max={expected ? undefined : maxOnHandExpiry} value={expected ? f.availabilityDate : f.expiresAt} onChange={expected ? set("availabilityDate") : set("expiresAt")} className={inputCls + " !pl-9"} />
                 </div>
-                <p className="mt-1 text-[11.5px] text-gray-500">{expected ? "Pick the date your harvest will be ready." : "On Hand products use today's date automatically."}</p></div>
+                <p className="mt-1 text-[11.5px] text-gray-500">{expected ? "Pick when your harvest will be ready." : "On Hand listings can expire today or within the next 4 days."}</p></div>
             </div>
 
             <div><Label>Description</Label>
@@ -189,10 +246,11 @@ function ProductForm({ initial, onBack, onSaved }) {
             <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => { pick(e.target.files?.[0]); e.target.value = ""; }} />
 
             <Label>Image Preview</Label>
-            <div className="relative h-40 overflow-hidden rounded-xl bg-[#E8F5E9]">
+            <div className={"relative h-40 overflow-hidden rounded-xl bg-[#E8F5E9] " + (f.image ? "cursor-zoom-in" : "")} onDoubleClick={f.image ? () => setZoomImage(f.image) : undefined} title={f.image ? "Double-click to enlarge the product image" : undefined}>
               {f.image ? (
                 <>
                   <img src={f.image} alt="Preview" className="h-full w-full object-cover" />
+                  <span className="pointer-events-none absolute bottom-2 left-2 rounded-full bg-black/55 px-2 py-1 text-[10px] text-white">Double-click to zoom</span>
                   <button type="button" aria-label="Remove image" onClick={() => setF((x) => ({ ...x, image: "" }))} className="absolute right-2 top-2 rounded-full bg-black/60 p-1 text-white"><X size={14} /></button>
                 </>
               ) : <div className="flex h-full items-center justify-center text-[12px] text-gray-400">No image yet</div>}
@@ -226,24 +284,26 @@ function ProductForm({ initial, onBack, onSaved }) {
           </div>
         </div>
       </form>
+      <ImageLightbox src={zoomImage} alt={f.product || "Product image preview"} onClose={() => setZoomImage("")} />
     </div>
   );
 }
 
 /* ---------------- Details pop-up ---------------- */
-function Details({ s, farmer, onClose, onReviews }) {
+function Details({ s, farmer, onClose, onReviews, onImageZoom }) {
   const a = stockInfo(s);
   const n = s.rating?.count || 0;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white shadow-xl">
-        <Photo src={s.image} alt={s.product} />
+        <Photo src={s.image} alt={s.product} onDoubleClick={() => onImageZoom?.(s.image)} />
         <div className="space-y-2 p-5 text-[13px] text-gray-700">
           <div className="flex items-start justify-between gap-2"><h3 className="text-[17px] font-semibold text-[#16301F]">{s.product}</h3><span className={"shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold " + a.cls}>{a.label}</span></div>
           <p>{s.category} · {peso(s.pricePerUnit)} / {s.unit}</p>
           <p>{s.supplyType === "expected" ? "Expected Harvest" : "On Hand"}</p>
           <p>Available {formatQty(s.availableQuantity)} {s.unit} · Total {formatQty(s.quantity)} · Reserved {formatQty(s.reservedQuantity)}</p>
           <p>{s.location} · {s.supplyType === "expected" ? "Harvest" : "Since"} {formatDate(s.availabilityDate)}</p>
+          {s.supplyType === "onhand" && s.expiresAt && <p>Expiry date: {formatDate(s.expiresAt)}</p>}
           <p className="text-gray-500">Posted by {farmer}</p>
           <button type="button" onClick={onReviews} className="flex w-full items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-left hover:bg-amber-100">
             <Stars value={s.rating?.avg} size={16} />
@@ -275,6 +335,7 @@ export default function MySupply({ intent, onNavigate, user }) {
   const [page, setPage] = useState(1);
   const [form, setForm] = useState(null);
   const [view, setView] = useState(null);
+  const [zoomImage, setZoomImage] = useState("");
   const [reviewsFor, setReviewsFor] = useState(null);
   const [busy, setBusy] = useState(null);
 
@@ -344,7 +405,7 @@ export default function MySupply({ intent, onNavigate, user }) {
           <option value="all">All Supply Types</option><option value="onhand">On Hand</option><option value="expected">Expected</option>
         </select>
         <select value={status} onChange={(e) => setStatus(e.target.value)} className={inputCls} aria-label="Filter by supply status">
-          <option value="all">All Status</option><option value="active">Active Supply</option><option value="pending">Pending approval</option><option value="available">Available</option><option value="out">Out of Stock</option><option value="rejected">Rejected</option></select>
+          <option value="all">All Status</option><option value="active">Active Supply</option><option value="pending">Pending approval</option><option value="available">Available</option><option value="out">Out of Stock</option><option value="expired">Expired</option><option value="rejected">Rejected</option></select>
         <select value={sort} onChange={(e) => setSort(e.target.value)} className={inputCls}>
           <option value="newest">Sort by: Newest</option><option value="oldest">Sort by: Oldest</option><option value="name">Sort by: Name</option></select>
       </div>
@@ -355,12 +416,12 @@ export default function MySupply({ intent, onNavigate, user }) {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {pageRows.map((s) => {
             const a = stockInfo(s);
-            const locked = s.status !== "available" || s.reservedQuantity > 0;
+            const locked = !["available", "expired"].includes(s.status) || s.reservedQuantity > 0;
             const expected = s.supplyType === "expected";
             const n = s.rating?.count || 0;
             return (
               <div key={s.id} className="overflow-hidden rounded-2xl border border-black/5 bg-white shadow-sm">
-                <Photo src={s.image} alt={s.product}>
+                <Photo src={s.image} alt={s.product} onDoubleClick={() => setZoomImage(s.image)}>
                   <span className={"absolute right-2 top-3 rounded-full px-2 py-0.5 text-[10.5px] font-semibold " + a.cls}>{a.label}</span>
                 </Photo>
                 <div className="p-3.5">
@@ -382,7 +443,7 @@ export default function MySupply({ intent, onNavigate, user }) {
                   <div className="mt-2.5 grid grid-cols-2 gap-2 text-[11px] text-gray-400">
                     <div>{expected ? <CalendarDays size={13} className="mb-0.5 text-[#2E7D32]" /> : <Package size={13} className="mb-0.5 text-[#2E7D32]" />}
                       {expected ? "Expected Harvest" : "On Hand"}
-                      <p className="text-[12px] font-semibold text-[#16301F]">{expected ? formatDate(s.availabilityDate) : `${formatQty(s.availableQuantity)} ${s.unit}`}</p></div>
+                      <p className="text-[12px] font-semibold text-[#16301F]">{expected ? formatDate(s.availabilityDate) : `${formatQty(s.availableQuantity)} ${s.unit}`}</p>{!expected && s.expiresAt && <p className="mt-0.5 text-[10.5px] font-medium text-amber-700">Expires {formatDate(s.expiresAt)}</p>}</div>
                     <div><MapPin size={13} className="mb-0.5 text-[#2E7D32]" />Location<p className="text-[12px] font-semibold text-[#16301F]">{s.location}</p></div>
                   </div>
                   <div className="mt-3 flex gap-2">
@@ -397,7 +458,8 @@ export default function MySupply({ intent, onNavigate, user }) {
         </div>
       )}
       <Pagination page={page} pageSize={PAGE_SIZE} total={shown.length} onPage={setPage} />
-      {view && <Details s={view} farmer={farmer} onClose={() => setView(null)} onReviews={() => setReviewsFor(view)} />}
+      {view && <Details s={view} farmer={farmer} onClose={() => setView(null)} onReviews={() => setReviewsFor(view)} onImageZoom={(src) => setZoomImage(src)} />}
+      <ImageLightbox src={zoomImage} alt="Product image" onClose={() => setZoomImage("")} />
       {reviewsFor && <ReviewsModal supply={reviewsFor} onClose={() => setReviewsFor(null)} />}
     </div>
   );

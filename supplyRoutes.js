@@ -10,9 +10,68 @@ import { matchSupplySafe } from "./matchingEngine.js";
 const MAX_ACTIVE_LISTINGS = 100;
 const NOT_FOUND = { error: "Supply not found." };
 
-// Only these categories and this unit are allowed.
-export const CATEGORIES = ["Vegetables", "Fruits", "Rice"];
-const UNIT = "kg";
+// Shared category and unit choices for supply creation and public listings.
+export const CATEGORIES = [
+  "Vegetables", "Fruits", "Rice", "Corn & Grains", "Root Crops", "Legumes & Beans",
+  "Herbs & Spices", "Mushrooms", "Coconut Products", "Coffee & Cacao", "Sugarcane",
+  "Dairy & Milk", "Eggs", "Livestock", "Poultry", "Meat", "Fish & Seafood",
+  "Honey & Bee Products", "Seeds & Seedlings", "Flowers & Ornamental Plants",
+  "Fiber Crops", "Farm By-products", "Other Farm Products",
+];
+const UNITS = ["kg", "ton", "sack", "crate", "piece", "bundle", "ml", "liter", "gal", "bottle", "tray", "dozen"];
+const PRODUCT_NAME_RE = /^\p{L}{2,60}$/u;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function dayKeyInManila(value = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(value);
+  const get = (type) => parts.find((part) => part.type === type)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+function dateKeyOffset(dayKey, offset) {
+  const [year, month, day] = dayKey.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + offset));
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
+}
+function parseDateOnly(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value ? null : parsed;
+}
+function isOnHandExpired(supply) {
+  if (!supply || supply.supplyType !== "onhand") return false;
+  const expiryKey = supply.expiresAt
+    ? dayKeyInManila(new Date(supply.expiresAt))
+    : supply.createdAt ? dateKeyOffset(dayKeyInManila(new Date(supply.createdAt)), 4) : "";
+  return Boolean(expiryKey && expiryKey < dayKeyInManila());
+}
+function onHandExpiryListingFilter() {
+  const today = dayKeyInManila();
+  const todayStart = parseDateOnly(today);
+  const legacyCutoff = new Date(Date.now() - 4 * DAY_MS);
+  return {
+    $or: [
+      { supplyType: { $ne: "onhand" } },
+      { supplyType: "onhand", expiresAt: { $gte: todayStart } },
+      { supplyType: "onhand", $or: [
+        { expiresAt: { $exists: false }, createdAt: { $gte: legacyCutoff } },
+        { expiresAt: null, createdAt: { $gte: legacyCutoff } },
+      ] },
+    ],
+  };
+}
+async function expireOldOnHandListings() {
+  const todayStart = parseDateOnly(dayKeyInManila());
+  const legacyCutoff = new Date(Date.now() - 4 * DAY_MS);
+  const unreserved = { $or: [{ reservedQuantity: { $lte: 0 } }, { reservedQuantity: null }, { reservedQuantity: { $exists: false } }] };
+  await Supply.updateMany({
+    status: "available",
+    supplyType: "onhand",
+    $and: [unreserved, { $or: [
+      { expiresAt: { $lt: todayStart } },
+      { $and: [ { $or: [{ expiresAt: { $exists: false } }, { expiresAt: null }] }, { createdAt: { $lt: legacyCutoff } } ] },
+    ] }],
+  }, { $set: { status: "expired", availableQuantity: 0 } });
+}
 const IMAGE_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
 const MAX_IMAGE_CHARS = 1_500_000; // the browser shrinks photos before upload
 
@@ -132,25 +191,36 @@ const reviewDto = (v) => (v ? { rating: v.rating, message: v.message || "", crea
 function readProductInput(body, { imageRequired }) {
   const b = body || {};
   const product = String(b.product || "").trim();
-  if (product.length < 2 || product.length > 60) return { error: "Enter a product name (2-60 characters)." };
-  if (!CATEGORIES.includes(b.category)) return { error: "Select a category (Vegetables, Fruits or Rice)." };
+  if (!PRODUCT_NAME_RE.test(product)) {
+    return { error: "Product name must use letters only, with no spaces, numbers, or special characters (2-60 letters)." };
+  }
+  if (!CATEGORIES.includes(b.category)) return { error: "Select a valid farm-product category." };
   const pricePerUnit = round2(Number(b.pricePerUnit));
   if (!Number.isFinite(pricePerUnit) || pricePerUnit <= 0) return { error: "Enter a price greater than 0." };
-  const unit = UNIT; // kg only, set by the server
+  const unit = String(b.unit || "");
+  if (!UNITS.includes(unit)) return { error: "Choose a valid quantity unit." };
   const supplyType = b.supplyType === "expected" ? "expected" : b.supplyType === "onhand" ? "onhand" : null;
   if (!supplyType) return { error: "Choose On Hand or Expected Harvest." };
   const quantity = round2(Number(b.quantity));
-  if (!Number.isFinite(quantity) || quantity <= 0) return { error: "Enter a quantity greater than 0." };
+  if (!Number.isFinite(quantity) || quantity < 10) return { error: `Minimum quantity is 10 ${unit}.` };
   const location = String(b.location || "").trim();
   if (!location || location.length > 120) return { error: "Select a location." };
 
-  const today = new Date().toISOString().slice(0, 10);
-  let availabilityDate = String(b.availabilityDate || "");
+  const today = dayKeyInManila();
+  const availabilityKey = String(b.availabilityDate || "");
+  let availabilityDate;
+  let expiresAt = null;
   if (supplyType === "expected") {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(availabilityDate)) return { error: "Harvest date is required for Expected Harvest." };
-    if (availabilityDate < today) return { error: "Harvest date cannot be in the past." };
+    availabilityDate = parseDateOnly(availabilityKey);
+    if (!availabilityDate) return { error: "Harvest date is required for Expected Harvest." };
+    if (availabilityKey < today) return { error: "Harvest date cannot be in the past." };
   } else {
-    availabilityDate = today;
+    availabilityDate = parseDateOnly(today);
+    const expiryKey = String(b.expiresAt || "");
+    expiresAt = parseDateOnly(expiryKey);
+    if (!expiresAt) return { error: "Expiry date is required for On Hand products." };
+    if (expiryKey < today) return { error: "Expiry date cannot be in the past." };
+    if (expiryKey > dateKeyOffset(today, 4)) return { error: "On Hand products can be listed for a maximum of 4 days." };
   }
 
   const description = String(b.description || "").trim().slice(0, 200);
@@ -167,7 +237,7 @@ function readProductInput(body, { imageRequired }) {
   }
 
   return {
-    value: { product, category: b.category, pricePerUnit, unit, supplyType, quantity, location, availabilityDate, description, image },
+    value: { product, category: b.category, pricePerUnit, unit, supplyType, quantity, location, availabilityDate, expiresAt, description, image },
   };
 }
 
@@ -285,6 +355,7 @@ function ownerView(s) {
     availableQuantity: s.availableQuantity,
     unit: s.unit,
     availabilityDate: s.availabilityDate,
+    expiresAt: s.expiresAt || null,
     location: s.location,
     status: s.status,
     approvalStatus: s.approvalStatus || "approved", // old records count as approved
@@ -309,6 +380,7 @@ function publicView(s, farmerName, rating) {
     availableQuantity: s.availableQuantity,
     unit: s.unit,
     availabilityDate: s.availabilityDate,
+    expiresAt: s.expiresAt || null,
     location: s.location,
     status: s.status,
     rating: rating || NO_RATING,
@@ -325,6 +397,7 @@ function applyInput(doc, v) {
   doc.supplyType = v.supplyType;
   doc.unit = v.unit;
   doc.availabilityDate = v.availabilityDate;
+  doc.expiresAt = v.expiresAt || null;
   doc.location = v.location;
   if (v.supplyType === "onhand") {
     doc.actualQuantity = v.quantity;
@@ -430,6 +503,7 @@ export default function createSupplyRouter() {
   // Buyer sends a pre-order. The quantity is held right away, so Available drops.
   router.post("/orders", writeLimiter, requireRole("buyer"), async (req, res) => {
     try {
+      await expireOldOnHandListings();
       const b = req.body || {};
       if (!isValidId(b.supplyId)) return res.status(404).json({ error: "Supply not found." });
 
@@ -449,6 +523,12 @@ export default function createSupplyRouter() {
       const fee = deliveryFee(qty, fulfillment); // set by the server, never by the browser
 
       const supply = await Supply.findById(b.supplyId).lean();
+      if (supply && isOnHandExpired(supply)) {
+        if (Number(supply.reservedQuantity || 0) <= 0) {
+          await Supply.updateOne({ _id: supply._id, status: "available" }, { $set: { status: "expired", availableQuantity: 0 } });
+        }
+        return res.status(404).json({ error: "This supply listing has expired." });
+      }
       const approved = !supply?.approvalStatus || supply.approvalStatus === "approved";
       if (!supply || supply.status !== "available" || supply.targetDemand || !approved) {
         return res.status(404).json({ error: "This supply is no longer available." });
@@ -647,6 +727,7 @@ export default function createSupplyRouter() {
   // Farmer: own listings only (pending, approved and rejected), with ratings.
   router.get("/mine", requireRole("farmer"), async (req, res) => {
     try {
+      await expireOldOnHandListings();
       const rows = await Supply.find({ farmer: req.user.id, targetDemand: null }).sort({ createdAt: -1 }).limit(200).lean();
       const ratings = await ratingsFor(rows.map((s) => s._id));
       res.json({ supplies: rows.map((s) => ({ ...ownerView(s), rating: ratings.get(String(s._id)) || NO_RATING })) });
@@ -659,10 +740,12 @@ export default function createSupplyRouter() {
   // in the list so they can be shown as "Out of Stock".
   router.get("/available", requireRole("buyer", "admin"), async (req, res) => {
     try {
+      await expireOldOnHandListings();
       const rows = await Supply.find({
         status: "available",
         approvalStatus: "approved",
         targetDemand: null,
+        ...onHandExpiryListingFilter(),
       })
         .sort({ createdAt: 1 })
         .limit(200)
@@ -713,6 +796,7 @@ export default function createSupplyRouter() {
   // and every approved product that farmer has uploaded (with ratings).
   router.get("/farmer/:id", requireRole("buyer", "admin"), async (req, res) => {
     try {
+      await expireOldOnHandListings();
       if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
       const supply = await Supply.findById(req.params.id).lean();
       if (!supply) return res.status(404).json(NOT_FOUND);
@@ -727,6 +811,7 @@ export default function createSupplyRouter() {
         status: "available",
         approvalStatus: "approved",
         targetDemand: null,
+        ...onHandExpiryListingFilter(),
       })
         .sort({ createdAt: 1 })
         .limit(60)
@@ -832,6 +917,7 @@ export default function createSupplyRouter() {
 
   router.post("/", writeLimiter, requireRole("farmer"), async (req, res) => {
     try {
+      await expireOldOnHandListings();
       const { value, error } = readProductInput(req.body, { imageRequired: true });
       if (error) return res.status(400).json({ error });
 
@@ -865,11 +951,12 @@ export default function createSupplyRouter() {
       if (doc.targetDemand) {
         return res.status(409).json({ error: "An offer made for a request cannot be edited." });
       }
-      if (doc.status !== "available" || doc.reservedQuantity > 0) {
+      if (!["available", "expired"].includes(doc.status) || doc.reservedQuantity > 0) {
         return res.status(409).json({ error: "This supply can no longer be edited." });
       }
 
       applyInput(doc, value);
+      doc.status = "available";
       doc.approvalStatus = "pending"; // every edit goes back to the admin
       doc.rejectionReason = "";
       await doc.save();
@@ -888,7 +975,7 @@ export default function createSupplyRouter() {
     try {
       if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
       const doc = await Supply.findOneAndUpdate(
-        { _id: req.params.id, farmer: req.user.id, status: "available", reservedQuantity: 0 },
+        { _id: req.params.id, farmer: req.user.id, status: { $in: ["available", "expired"] }, reservedQuantity: 0 },
         { status: "cancelled", availableQuantity: 0 },
         { new: true }
       );

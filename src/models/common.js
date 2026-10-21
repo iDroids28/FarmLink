@@ -1,7 +1,7 @@
 /* Shared rules for Supply and Demand forms. These mirror farmValidation.js on
    the server (the server is the one that actually enforces them). */
 
-export const UNITS = ["kg", "ton", "sack", "crate", "piece", "bundle"];
+export const UNITS = ["kg", "ton", "sack", "crate", "piece", "bundle", "ml", "liter", "gal", "bottle", "tray", "dozen"];
 
 const TEXT_RE = /^[\p{L}\p{N}\s.,'()-]+$/u;
 const MAX_QUANTITY = 1000000;

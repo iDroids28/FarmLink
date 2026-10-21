@@ -3,7 +3,7 @@ import { SAFE_MESSAGES } from "./safeErrors.js";
 /* Server-side validation for Supply and Demand input. The browser's own checks
    are only for convenience; this file is the real gatekeeper. */
 
-export const UNITS = ["kg", "ton", "sack", "crate", "piece", "bundle"];
+export const UNITS = ["kg", "ton", "sack", "crate", "piece", "bundle", "ml", "liter", "gal", "bottle", "tray", "dozen"];
 export const SUPPLY_TYPES = ["onhand", "expected"];
 
 const TEXT_RE = /^[\p{L}\p{N}\s.,'()-]+$/u;
