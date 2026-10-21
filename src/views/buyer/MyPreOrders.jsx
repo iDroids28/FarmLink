@@ -55,6 +55,9 @@ function OrderDetails({ o, hasPhoto, onClose, onRated }) {
   const [rating, setRating] = useState(0);
   const [hover, setHover] = useState(0);
   const [message, setMessage] = useState("");
+  const [farmerRating, setFarmerRating] = useState(0);
+  const [farmerHover, setFarmerHover] = useState(0);
+  const [farmerMessage, setFarmerMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
@@ -87,11 +90,21 @@ function OrderDetails({ o, hasPhoto, onClose, onRated }) {
     e.preventDefault();
     if (busy) return;
     setError("");
-    if (rating < 1) return setError("Tap the stars to choose a rating.");
+    if (!o.review && rating < 1) return setError("Choose a star rating for the product.");
+    if (!o.farmerReview && farmerRating < 1) return setError("Choose a star rating for the farmer.");
+    const ratings = {};
+    if (!o.review) {
+      ratings.productRating = rating;
+      ratings.productMessage = message.trim();
+    }
+    if (!o.farmerReview) {
+      ratings.farmerRating = farmerRating;
+      ratings.farmerMessage = farmerMessage.trim();
+    }
     setBusy(true);
     try {
-      await supplyApi.rateOrder(o.id, rating, message.trim());
-      setNote("Thank you! Your rating was sent to the farmer.");
+      await supplyApi.rateOrder(o.id, ratings);
+      setNote("Thank you! Your ratings were submitted.");
       await onRated();
     } catch (err) {
       setError(err.message);
@@ -101,6 +114,7 @@ function OrderDetails({ o, hasPhoto, onClose, onRated }) {
   }
 
   const shownStars = hover || rating;
+  const shownFarmerStars = farmerHover || farmerRating;
 
   return (
     <div
@@ -155,42 +169,57 @@ function OrderDetails({ o, hasPhoto, onClose, onRated }) {
             </div>
           )}
 
-          <div className="border-t border-black/5 pt-3">
-            {o.review ? (
-              <div>
-                <p className="text-[13px] font-semibold text-[#16301F]">Your rating</p>
-                <Stars value={o.review.rating} size={20} />
-                {o.review.message ? (
-                  <p className="mt-1 whitespace-pre-line rounded-lg bg-gray-50 p-2 text-[13px] text-gray-700">{o.review.message}</p>
-                ) : (
-                  <p className="mt-1 text-[12.5px] italic text-gray-400">No message</p>
-                )}
-                <Notice type="success">{note}</Notice>
+          <div className="space-y-4 border-t border-black/5 pt-3">
+            {o.review && (
+              <div className="rounded-xl bg-amber-50 p-3">
+                <p className="text-[13px] font-semibold text-[#16301F]">Your product rating</p>
+                <Stars value={o.review.rating} size={18} />
+                {o.review.message ? <p className="mt-1 whitespace-pre-line text-[13px] text-gray-700">{o.review.message}</p> : <p className="mt-1 text-[12.5px] italic text-gray-400">No message</p>}
               </div>
-            ) : (
-              <form onSubmit={submit} className="space-y-3" noValidate>
-                <p className="text-[13px] font-semibold text-[#16301F]">Rate this product</p>
-                <div className="flex gap-1" onMouseLeave={() => setHover(0)}>
-                  {[1, 2, 3, 4, 5].map((i) => (
-                    <button key={i} type="button" onClick={() => setRating(i)} onMouseEnter={() => setHover(i)} aria-label={`${i} star${i > 1 ? "s" : ""}`}>
-                      <Star size={30} className={shownStars >= i ? "text-amber-400" : "text-gray-300"} fill={shownStars >= i ? "currentColor" : "none"} />
-                    </button>
-                  ))}
-                </div>
-                <textarea
-                  rows={3}
-                  maxLength={300}
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  placeholder="Write a message for the farmer and other buyers (optional)"
-                  className={inputCls}
-                />
+            )}
+            {o.farmerReview && (
+              <div className="rounded-xl bg-green-50 p-3">
+                <p className="text-[13px] font-semibold text-[#16301F]">Your farmer rating</p>
+                <Stars value={o.farmerReview.rating} size={18} />
+                {o.farmerReview.message ? <p className="mt-1 whitespace-pre-line text-[13px] text-gray-700">{o.farmerReview.message}</p> : <p className="mt-1 text-[12.5px] italic text-gray-400">No message</p>}
+              </div>
+            )}
+            {(!o.review || !o.farmerReview) && (
+              <form onSubmit={submit} className="space-y-4" noValidate>
+                {!o.review && (
+                  <div className="space-y-2 rounded-xl border border-amber-100 p-3">
+                    <p className="text-[13px] font-semibold text-[#16301F]">Rate this product</p>
+                    <div className="flex gap-1" onMouseLeave={() => setHover(0)}>
+                      {[1, 2, 3, 4, 5].map((i) => (
+                        <button key={i} type="button" onClick={() => setRating(i)} onMouseEnter={() => setHover(i)} aria-label={`Product: ${i} star${i > 1 ? "s" : ""}`}>
+                          <Star size={28} className={shownStars >= i ? "text-amber-400" : "text-gray-300"} fill={shownStars >= i ? "currentColor" : "none"} />
+                        </button>
+                      ))}
+                    </div>
+                    <textarea rows={2} maxLength={300} value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Share feedback about the product (optional)" className={inputCls} />
+                  </div>
+                )}
+                {!o.farmerReview && (
+                  <div className="space-y-2 rounded-xl border border-green-100 p-3">
+                    <p className="text-[13px] font-semibold text-[#16301F]">Rate this farmer</p>
+                    <p className="text-[12px] text-gray-500">Rate your experience with {o.farmerName || "the farmer"}.</p>
+                    <div className="flex gap-1" onMouseLeave={() => setFarmerHover(0)}>
+                      {[1, 2, 3, 4, 5].map((i) => (
+                        <button key={i} type="button" onClick={() => setFarmerRating(i)} onMouseEnter={() => setFarmerHover(i)} aria-label={`Farmer: ${i} star${i > 1 ? "s" : ""}`}>
+                          <Star size={28} className={shownFarmerStars >= i ? "text-amber-400" : "text-gray-300"} fill={shownFarmerStars >= i ? "currentColor" : "none"} />
+                        </button>
+                      ))}
+                    </div>
+                    <textarea rows={2} maxLength={300} value={farmerMessage} onChange={(e) => setFarmerMessage(e.target.value)} placeholder="Share feedback about the farmer (optional)" className={inputCls} />
+                  </div>
+                )}
                 {error && <p className="rounded-lg bg-red-50 p-2.5 text-[12.5px] text-red-700">{error}</p>}
                 <button type="submit" disabled={busy} className={primaryBtn + " w-full"} style={primaryStyle}>
-                  {busy ? "Sending..." : "Submit rating"}
+                  {busy ? "Sending…" : (!o.review && !o.farmerReview ? "Submit both ratings" : "Submit rating")}
                 </button>
               </form>
             )}
+            {note && <Notice type="success">{note}</Notice>}
           </div>
 
           <button type="button" onClick={onClose} className="w-full rounded-lg bg-gray-100 py-2 text-[13px] font-semibold text-gray-700 hover:bg-gray-200">Close</button>
@@ -287,11 +316,11 @@ export default function MyPreOrders({ onNavigate }) {
                     {o.notes && <p className="mt-1 rounded-lg bg-gray-50 p-2 text-[12.5px] text-gray-700">Your message: {o.notes}</p>}
                     {isDone(o) && (
                       <p className="mt-1 flex items-center gap-1.5 text-[12.5px]">
-                        {o.review ? (
-                          <><Stars value={o.review.rating} /> <span className="text-gray-500">You rated this product</span></>
+                        {o.review && o.farmerReview ? (
+                          <><Stars value={o.review.rating} /> <span className="text-gray-500">Product and farmer rated</span></>
                         ) : (
                           <button type="button" onClick={() => setDetailId(o.id)} className="font-semibold text-amber-700 hover:underline">
-                            Rate this product
+                            {!o.review && !o.farmerReview ? "Rate product & farmer" : !o.review ? "Rate this product" : "Rate this farmer"}
                           </button>
                         )}
                       </p>

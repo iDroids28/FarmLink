@@ -128,16 +128,23 @@ export default function OrderManagement({ onNavigate }) {
                 {isDone(o) ? (
                   <div className="mt-3 space-y-2">
                     <p className="text-[12.5px] font-semibold text-green-700">This order is {delivery ? "delivered" : "completed"}.</p>
-                    {o.review ? (
+                    {o.review && (
                       <div className="rounded-xl bg-amber-50 p-3">
                         <p className="flex items-center gap-2 text-[12.5px] font-semibold text-[#16301F]">
-                          {o.buyerName} rated this <Stars value={o.review.rating} />
+                          {o.buyerName} rated the product <Stars value={o.review.rating} />
                         </p>
                         {o.review.message && <p className="mt-1 whitespace-pre-line text-[12.5px] text-gray-700">{o.review.message}</p>}
                       </div>
-                    ) : (
-                      <p className="text-[12px] text-gray-400">The buyer has not rated this order yet.</p>
                     )}
+                    {o.farmerReview && (
+                      <div className="rounded-xl bg-green-50 p-3">
+                        <p className="flex items-center gap-2 text-[12.5px] font-semibold text-[#16301F]">
+                          {o.buyerName} rated your farmer profile <Stars value={o.farmerReview.rating} />
+                        </p>
+                        {o.farmerReview.message && <p className="mt-1 whitespace-pre-line text-[12.5px] text-gray-700">{o.farmerReview.message}</p>}
+                      </div>
+                    )}
+                    {!o.review && !o.farmerReview && <p className="text-[12px] text-gray-400">The buyer has not submitted ratings yet.</p>}
                   </div>
                 ) : (
                   <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-black/5 pt-3">

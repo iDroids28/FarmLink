@@ -28,7 +28,7 @@ export default function NotificationBell({ user, onNavigate }) {
         ? (freshRes.value?.notifications || []).map((n) => ({
             key: `new:${n.id}`, source: "new", rawId: n.id, title: n.title, message: n.message,
             createdAt: n.createdAt, read: n.read !== false, type: n.type,
-            matchId: n.matchId || null, requestId: n.requestId || null,
+            matchId: n.matchId || null, requestId: n.requestId || null, demandId: n.demandId || null,
           }))
         : [];
     const old =
@@ -36,7 +36,7 @@ export default function NotificationBell({ user, onNavigate }) {
         ? (oldRes.value?.notifications || []).map((n) => ({
             key: `old:${n.id}`, source: "old", rawId: String(n.id), title: n.title, message: n.message,
             createdAt: n.createdAt, read: legacyRead.has(String(n.id)), type: "old",
-            matchId: null, requestId: null,
+            matchId: null, requestId: null, demandId: null,
           }))
         : [];
 
@@ -86,7 +86,9 @@ export default function NotificationBell({ user, onNavigate }) {
   function openItem(n) {
     setToast(null);
     markRead(n);
-    if (n.requestId) {
+    if (n.demandId && role === "farmer") {
+      onNavigate?.("business-requests");
+    } else if (n.requestId) {
       onNavigate?.(role === "farmer" ? "requests" : "my-requests");
     } else if (n.matchId && (role === "farmer" || role === "buyer")) {
       onNavigate?.("notifications", `match:${n.matchId}`);

@@ -1314,6 +1314,7 @@ const FEATURE_MODELS = [
   "MatchOrder",
   "MatchPhoto",
   "ProductReview",
+  "FarmerReview",
   "DemandDelivery",
   "OrderPhoto",
 ];

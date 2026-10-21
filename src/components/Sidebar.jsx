@@ -29,7 +29,7 @@ import { roleApplicationApi } from "../api/roleApplicationApi.js";
 // Buyer menu: Find Supply, My Requests and My Pre Orders (order tracker).
 const BUYER_MENU = [
   { id: "dashboard",     label: "Dashboard",       icon: LayoutDashboard },
-  { id: "demands",       label: "My Requirements", icon: ClipboardList },
+  { id: "demands",       label: "My Demand",       icon: ClipboardList },
   { id: "available",     label: "Find Supply",     icon: PackageSearch },
   { id: "matches",       label: "Matches",         icon: Handshake },
   { id: "my-requests",   label: "My Requests",     icon: Send },

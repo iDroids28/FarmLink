@@ -82,7 +82,16 @@ export default function ReviewsModal({ supply, onClose }) {
               {reviews.map((r) => (
                 <li key={r.id} className="rounded-xl border border-black/5 p-3">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="truncate text-[13.5px] font-semibold text-[#16301F]">{r.buyerName}</p>
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#E8F5E9] text-[12px] font-bold text-[#2E7D32]">
+                        {r.buyerPhoto ? (
+                          <img src={r.buyerPhoto} alt={`${r.buyerName}'s profile`} className="h-full w-full object-cover" />
+                        ) : (
+                          String(r.buyerName || "B").trim().slice(0, 1).toUpperCase()
+                        )}
+                      </span>
+                      <p className="truncate text-[13.5px] font-semibold text-[#16301F]">{r.buyerName}</p>
+                    </div>
                     <span className="shrink-0 text-[11.5px] text-gray-400">{formatDate(r.createdAt)}</span>
                   </div>
                   <Stars value={r.rating} />

@@ -154,7 +154,7 @@ export default function MyDemands({ onNavigate, intent }) {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="My Demands" subtitle="Tell farmers what your business needs, then track possible matches and confirmations." />
+      <PageHeader title="My Demand" subtitle="Tell farmers what your business needs, then track possible matches and confirmations." />
       <LoadNote loading={vm.loading && mine.length === 0} error={showForm ? "" : vm.error} />
       {vm.success && !showForm && <p className="rounded-xl bg-green-50 p-3 text-[13px] text-green-800">{vm.success}</p>}
 

@@ -21,6 +21,7 @@ export default function createNoticeRouter() {
           message: n.message, read: n.read, createdAt: n.createdAt,
           matchId: n.match ? String(n.match) : null,
           requestId: n.request ? String(n.request) : null,
+          demandId: n.demand ? String(n.demand) : null,
         })),
       });
     } catch (err) {

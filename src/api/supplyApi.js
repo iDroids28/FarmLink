@@ -34,12 +34,16 @@ export const supplyApi = {
   available: () => call("/available"),
   // Buyer / Admin: the farmer who owns a supply: personal information, farm name, all products
   farmer: (supplyId) => call(`/farmer/${supplyId}`),
-  // Everyone: all reviews of one product (buyers' names, stars and messages)
+  // Product and farmer account reviews (buyers' names, profile photos, stars and messages)
   reviews: (supplyId) => call(`/${supplyId}/reviews`),
+  farmerReviews: (farmerId) => call(`/farmer-account/${farmerId}/reviews`),
   // Buyer: pre-order (pick up or delivery), tracker, and rating a completed order
   createOrder: (b) => call("/orders", { method: "POST", body: b }),
   myOrders: () => call("/orders/mine"),
-  rateOrder: (id, rating, message) => call(`/orders/${id}/review`, { method: "POST", body: { rating, message } }),
+  rateOrder: (id, ratings, message) => call(`/orders/${id}/review`, {
+    method: "POST",
+    body: ratings && typeof ratings === "object" ? ratings : { rating: ratings, message },
+  }),
   // Buyer: Pick Up / Delivery choice of a requirement
   saveDemandDelivery: (b) => call("/demand-delivery", { method: "POST", body: b }),
   demandDelivery: () => call("/demand-delivery"),

@@ -214,7 +214,7 @@ export default function Notifications({ user, intent, onNavigate }) {
     }));
     const added = (fresh || []).map((n) => ({
       id: `new:${n.id}`, rawId: n.id, legacyId: null, title: n.title, message: n.message,
-      createdAt: n.createdAt, matchId: n.matchId || null, requestId: n.requestId || null,
+      createdAt: n.createdAt, matchId: n.matchId || null, requestId: n.requestId || null, demandId: n.demandId || null,
       type: n.type, isNew: n.read === false,
     }));
     return [...old, ...added].sort((a, b) => time(b.createdAt) - time(a.createdAt));
@@ -246,6 +246,10 @@ export default function Notifications({ user, intent, onNavigate }) {
 
   function openItem(n) {
     if (n.isNew) markItemRead(n);
+    if (n.demandId && role === "farmer") {
+      onNavigate?.("business-requests");
+      return;
+    }
     if (n.requestId) {
       onNavigate?.(requestPage);
       return;
@@ -308,7 +312,9 @@ export default function Notifications({ user, intent, onNavigate }) {
                   {n.message}
                 </p>
                 <p className="mt-2 flex items-center gap-1 text-[12.5px] font-semibold text-[#2E7D32]">
-                  {n.requestId
+                  {n.demandId && role === "farmer"
+                    ? "View Business Requests"
+                    : n.requestId
                     ? role === "farmer" ? "View and respond" : "View request"
                     : n.matchId && canOpenMatch
                     ? role === "farmer" ? "View and respond" : "View match"

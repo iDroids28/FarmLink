@@ -9,6 +9,8 @@ export const NOTICE_TYPES = [
   "order_status",
   // A buyer rated a product after the order was complete
   "product_rated",
+  // Broadcast a buyer demand to farmers who do not already receive a match alert.
+  "buyer_demand_created",
 ];
 
 const noticeSchema = new mongoose.Schema(
@@ -21,6 +23,8 @@ const noticeSchema = new mongoose.Schema(
     match: { type: mongoose.Schema.Types.ObjectId, default: null },
     // The supply request (or supply listing) this notice is about
     request: { type: mongoose.Schema.Types.ObjectId, default: null },
+    // A buyer demand that farmers can open from a broadcast notification.
+    demand: { type: mongoose.Schema.Types.ObjectId, ref: "Demand", default: null, index: true },
   },
   { timestamps: true }
 );
@@ -29,12 +33,13 @@ noticeSchema.index({ user: 1, createdAt: -1 });
 export const Notice = mongoose.models.UserNotice || mongoose.model("UserNotice", noticeSchema, "user_notices");
 
 // A notification problem must never fail the user's real request.
-export async function notify(user, type, title, message, match = null, request = null) {
+export async function notify(user, type, title, message, match = null, request = null, demand = null) {
   try {
     await Notice.create({
       user, type, title, message,
       ...(match ? { match } : {}),
       ...(request ? { request } : {}),
+      ...(demand ? { demand } : {}),
     });
   } catch (err) {
     console.error("Notice error:", err);

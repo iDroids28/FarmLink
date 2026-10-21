@@ -3,6 +3,7 @@ import { X, User, Store, Sprout } from "lucide-react";
 import { formatDate, formatQty } from "./FormBits.jsx";
 import { peso } from "./SupplyCard.jsx";
 import ReviewsModal, { Stars } from "./ReviewsModal.jsx";
+import FarmerReviewsModal from "./FarmerReviewsModal.jsx";
 import { supplyApi } from "../api/supplyApi.js";
 import { farmerRepository } from "../repositories/farmerRepository";
 
@@ -49,6 +50,7 @@ export default function SupplyFarmerModal({ supply, onClose, onOrder }) {
   const [data, setData] = useState(null); // { farmer, products }
   const [error, setError] = useState("");
   const [reviewsFor, setReviewsFor] = useState(null);
+  const [showFarmerReviews, setShowFarmerReviews] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -62,10 +64,10 @@ export default function SupplyFarmerModal({ supply, onClose, onOrder }) {
   }, [supply.id]);
 
   useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && !reviewsFor && onClose();
+    const onKey = (e) => e.key === "Escape" && !reviewsFor && !showFarmerReviews && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, reviewsFor]);
+  }, [onClose, reviewsFor, showFarmerReviews]);
 
   const f = data?.farmer;
   const products = data?.products || [];
@@ -113,6 +115,16 @@ export default function SupplyFarmerModal({ supply, onClose, onOrder }) {
               <X size={18} />
             </button>
           </div>
+
+          {f && (
+            <button type="button" onClick={() => setShowFarmerReviews(true)} className="mt-3 flex w-full items-center justify-between gap-3 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2.5 text-left hover:bg-amber-100">
+              <span className="min-w-0">
+                <span className="block text-[12px] font-semibold text-[#16301F]">Farmer rating</span>
+                <span className="mt-0.5 flex items-center gap-1.5"><Stars value={f.rating?.avg} size={13} /><span className="text-[11.5px] text-gray-600">{f.rating?.count ? `${f.rating.avg} · ${f.rating.count} review${f.rating.count === 1 ? "" : "s"}` : "No reviews yet"}</span></span>
+              </span>
+              <span className="shrink-0 text-[11.5px] font-semibold text-amber-800">See farmer reviews</span>
+            </button>
+          )}
 
           {error && <p className="mt-4 rounded-lg bg-red-50 p-2.5 text-[12.5px] text-red-700">{error}</p>}
           {!data && !error && <p className="mt-4 text-[13px] text-gray-500">Loading…</p>}
@@ -190,6 +202,7 @@ export default function SupplyFarmerModal({ supply, onClose, onOrder }) {
       </div>
 
       {reviewsFor && <ReviewsModal supply={reviewsFor} onClose={() => setReviewsFor(null)} />}
+      {showFarmerReviews && <FarmerReviewsModal farmerId={f?.id} farmerName={farmerName} onClose={() => setShowFarmerReviews(false)} />}
     </>
   );
 }

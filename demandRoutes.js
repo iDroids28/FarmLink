@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import { Demand, Supply } from "./farmModels.js";
 import { Match } from "./matchModel.js";
 import { authenticate, requireRole, writeLimiter } from "./security.js";
@@ -8,6 +9,7 @@ import { matchDemandSafe, cancelDemandWithMatches, offerSupplyToDemand } from ".
 import { businessProfileFor } from "./businessProfile.js";
 import { breakdownFor, COUNTED_MATCH } from "./demandBreakdown.js";
 import { isValidMatchPhoto } from "./matchPhotoModel.js";
+import { notify } from "./noticeModel.js";
 
 const MAX_ACTIVE_REQUESTS = 100;
 const NOT_FOUND = { error: "Demand not found." };
@@ -376,6 +378,45 @@ export default function createDemandRouter() {
       });
 
       await matchDemandSafe(doc._id);
+
+      // Farmers with an automatically created match already receive a match
+      // notification. Broadcast the new demand to every other farmer account,
+      // including farmers who have not uploaded any supply yet. Notification
+      // failures must never undo a successfully created demand.
+      try {
+        const [farmers, alreadyMatchedFarmerIds] = await Promise.all([
+          mongoose.model("User").find({ role: "farmer" }).select("_id").lean(),
+          Match.distinct("farmer", {
+            demand: doc._id,
+            status: { $in: COUNTED_MATCH },
+          }),
+        ]);
+        const alreadyAlerted = new Set(alreadyMatchedFarmerIds.map(String));
+        const neededDateLabel = new Date(doc.neededDate).toLocaleDateString("en-PH", {
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+          timeZone: "Asia/Manila",
+        });
+        const demandMessage = `${doc.product}: ${doc.quantity} ${doc.unit} needed in ${doc.location} by ${neededDateLabel}. Open Business Requests to see the demand and offer supply.`;
+        await Promise.all(
+          farmers
+            .filter((farmer) => !alreadyAlerted.has(String(farmer._id)))
+            .map((farmer) =>
+              notify(
+                farmer._id,
+                "buyer_demand_created",
+                "New Buyer Demand",
+                demandMessage,
+                null,
+                null,
+                doc._id
+              )
+            )
+        );
+      } catch (noticeError) {
+        console.error("Broadcast buyer demand notification error:", noticeError);
+      }
 
       const fresh = await Demand.findById(doc._id).lean();
 

@@ -77,7 +77,7 @@ const MAX_IMAGE_CHARS = 1_500_000; // the browser shrinks photos before upload
 
 const MATCH_TYPES = ["match_created", "match_confirmed", "match_declined", "match_cancelled"];
 const BUYER_REQUEST_TYPES = ["request_confirmed", "request_declined"];
-const SUPPLY_RESULT_TYPES = ["supply_approved", "supply_rejected", "product_rated"];
+const SUPPLY_RESULT_TYPES = ["supply_approved", "supply_rejected", "product_rated", "farmer_rated"];
 
 const baseQuantity = (s) => (s.supplyType === "onhand" ? s.actualQuantity : s.estimatedQuantity);
 
@@ -111,6 +111,20 @@ const reviewSchema = new mongoose.Schema(
 const ProductReview =
   mongoose.models.ProductReview || mongoose.model("ProductReview", reviewSchema, "product_reviews");
 
+const farmerReviewSchema = new mongoose.Schema(
+  {
+    supply: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    order: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true }, // one farmer rating per completed order
+    farmer: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    buyer: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    rating: { type: Number, required: true, min: 1, max: 5 },
+    message: { type: String, default: "", maxlength: 300 },
+  },
+  { timestamps: true }
+);
+const FarmerReview =
+  mongoose.models.FarmerReview || mongoose.model("FarmerReview", farmerReviewSchema, "farmer_reviews");
+
 const demandDeliverySchema = new mongoose.Schema(
   {
     demand: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
@@ -135,6 +149,23 @@ async function ratingsFor(ids) {
     { $group: { _id: "$supply", avg: { $avg: "$rating" }, count: { $sum: 1 } } },
   ]);
   return new Map(rows.map((r) => [String(r._id), { avg: round1(r.avg), count: r.count }]));
+}
+
+async function farmerRatingsFor(ids) {
+  if (!ids.length) return new Map();
+  const rows = await FarmerReview.aggregate([
+    { $match: { farmer: { $in: ids } } },
+    { $group: { _id: "$farmer", avg: { $avg: "$rating" }, count: { $sum: 1 } } },
+  ]);
+  return new Map(rows.map((r) => [String(r._id), { avg: round1(r.avg), count: r.count }]));
+}
+
+async function profilePhotosFor(userIds) {
+  const Profile = mongoose.models.Profile;
+  if (!Profile || !userIds.length) return new Map();
+  const ids = [...new Set(userIds.map(String))];
+  const rows = await Profile.find({ userId: { $in: ids } }).select("userId photo").lean();
+  return new Map(rows.map((p) => [String(p.userId), p.photo || ""]));
 }
 
 /* ---------------- Order steps (what the farmer moves an order through) ---------------- */
@@ -186,6 +217,7 @@ function orderDto(r, extra = {}) {
 }
 
 const reviewDto = (v) => (v ? { rating: v.rating, message: v.message || "", createdAt: v.createdAt } : null);
+const farmerReviewDto = (v) => (v ? { rating: v.rating, message: v.message || "", createdAt: v.createdAt } : null);
 
 /* ---------------- Validation for the "Add Product" form ---------------- */
 function readProductInput(body, { imageRequired }) {
@@ -601,7 +633,11 @@ export default function createSupplyRouter() {
       const reviews = rows.length
         ? await ProductReview.find({ order: { $in: rows.map((r) => r._id) } }).lean()
         : [];
+      const farmerReviews = rows.length
+        ? await FarmerReview.find({ order: { $in: rows.map((r) => r._id) } }).lean()
+        : [];
       const byOrder = new Map(reviews.map((v) => [String(v.order), v]));
+      const farmerByOrder = new Map(farmerReviews.map((v) => [String(v.order), v]));
       res.json({
         orders: rows.map((r) => {
           const s = bySupply.get(String(r.supply));
@@ -611,6 +647,7 @@ export default function createSupplyRouter() {
             pricePerUnit: s?.pricePerUnit || 0,
             farmerName: s ? names.get(String(s.farmer)) || "Farmer" : "Farmer",
             review: reviewDto(byOrder.get(String(r._id))),
+            farmerReview: farmerReviewDto(farmerByOrder.get(String(r._id))),
           });
         }),
       });
@@ -635,7 +672,11 @@ export default function createSupplyRouter() {
       const reviews = rows.length
         ? await ProductReview.find({ order: { $in: rows.map((r) => r._id) } }).lean()
         : [];
+      const farmerReviews = rows.length
+        ? await FarmerReview.find({ order: { $in: rows.map((r) => r._id) } }).lean()
+        : [];
       const byOrder = new Map(reviews.map((v) => [String(v.order), v]));
+      const farmerByOrder = new Map(farmerReviews.map((v) => [String(v.order), v]));
       res.json({
         orders: rows.map((r) => {
           const s = bySupply.get(String(r.supply));
@@ -644,6 +685,7 @@ export default function createSupplyRouter() {
             pricePerUnit: s?.pricePerUnit || 0,
             buyerName: buyerName.get(String(r.requester)) || "Buyer",
             review: reviewDto(byOrder.get(String(r._id))),
+            farmerReview: farmerReviewDto(farmerByOrder.get(String(r._id))),
           });
         }),
       });
@@ -682,43 +724,79 @@ export default function createSupplyRouter() {
     }
   });
 
-  // Buyer rates a product (1-5 stars + message) once the order is complete.
+  // Buyer may rate the product and the farmer independently after the order is complete.
+  // Legacy clients sending `rating` and `message` still submit a product review.
   router.post("/orders/:id/review", writeLimiter, requireRole("buyer"), async (req, res) => {
     try {
       if (!isValidId(req.params.id)) return res.status(404).json({ error: "Order not found." });
-      const rating = Math.round(Number(req.body?.rating));
-      if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
-        return res.status(400).json({ error: "Choose a rating from 1 to 5 stars." });
+      const body = req.body || {};
+      const productValue = body.productRating ?? body.rating;
+      const farmerValue = body.farmerRating;
+      const hasProductRating = productValue !== undefined && productValue !== null && productValue !== "";
+      const hasFarmerRating = farmerValue !== undefined && farmerValue !== null && farmerValue !== "";
+      if (!hasProductRating && !hasFarmerRating) {
+        return res.status(400).json({ error: "Rate the product, the farmer, or both before submitting." });
       }
-      const message = String(req.body?.message || "").trim().slice(0, 300);
+      const productRating = hasProductRating ? Math.round(Number(productValue)) : null;
+      const farmerRating = hasFarmerRating ? Math.round(Number(farmerValue)) : null;
+      if (hasProductRating && (!Number.isFinite(productRating) || productRating < 1 || productRating > 5)) {
+        return res.status(400).json({ error: "Choose a product rating from 1 to 5 stars." });
+      }
+      if (hasFarmerRating && (!Number.isFinite(farmerRating) || farmerRating < 1 || farmerRating > 5)) {
+        return res.status(400).json({ error: "Choose a farmer rating from 1 to 5 stars." });
+      }
+      const productMessage = String(body.productMessage ?? body.message ?? "").trim().slice(0, 300);
+      const farmerMessage = String(body.farmerMessage || "").trim().slice(0, 300);
 
       const order = await PreOrderRequest.findOne({ _id: req.params.id, requester: req.user.id, status: "confirmed" });
       if (!order) return res.status(404).json({ error: "Order not found." });
       const steps = stepsFor(order);
       if ((order.orderStatus || "accepted") !== steps[steps.length - 1].id) {
-        return res.status(409).json({ error: "You can rate a product after the order is complete." });
+        return res.status(409).json({ error: "You can rate after the order is complete." });
       }
 
-      let review;
-      try {
-        review = await ProductReview.create({
-          supply: order.supply,
-          order: order._id,
-          farmer: order.owner,
-          buyer: req.user.id,
-          rating,
-          message,
-        });
-      } catch (err) {
-        if (err?.code === 11000) return res.status(409).json({ error: "You already rated this order." });
-        throw err;
+      let productReview = await ProductReview.findOne({ order: order._id }).lean();
+      let farmerReview = await FarmerReview.findOne({ order: order._id }).lean();
+      let createdProductReview = null;
+      let createdFarmerReview = null;
+      if (hasProductRating && !productReview) {
+        try {
+          createdProductReview = await ProductReview.create({
+            supply: order.supply, order: order._id, farmer: order.owner,
+            buyer: req.user.id, rating: productRating, message: productMessage,
+          });
+          productReview = createdProductReview;
+        } catch (err) {
+          if (err?.code === 11000) return res.status(409).json({ error: "The product rating was already submitted." });
+          throw err;
+        }
+      }
+      if (hasFarmerRating && !farmerReview) {
+        try {
+          createdFarmerReview = await FarmerReview.create({
+            supply: order.supply, order: order._id, farmer: order.owner,
+            buyer: req.user.id, rating: farmerRating, message: farmerMessage,
+          });
+          farmerReview = createdFarmerReview;
+        } catch (err) {
+          if (err?.code === 11000) return res.status(409).json({ error: "The farmer rating was already submitted." });
+          throw err;
+        }
+      }
+      if (!createdProductReview && !createdFarmerReview) {
+        return res.status(409).json({ error: "You already submitted these ratings for this order." });
       }
 
       const who = await userName(req.user.id, "A buyer");
-      await sendNotice(order.owner, "product_rated", "New product rating",
-        `${who} rated ${order.product} ${rating}/5.${message ? ` "${message}"` : ""}`);
-
-      res.status(201).json({ review: reviewDto(review) });
+      if (createdProductReview) {
+        await sendNotice(order.owner, "product_rated", "New product rating",
+          `${who} rated ${order.product} ${productRating}/5.${productMessage ? ` "${productMessage}"` : ""}`, order._id);
+      }
+      if (createdFarmerReview) {
+        await sendNotice(order.owner, "farmer_rated", "New farmer profile rating",
+          `${who} rated your farmer profile ${farmerRating}/5.${farmerMessage ? ` "${farmerMessage}"` : ""}`, order._id);
+      }
+      res.status(201).json({ review: reviewDto(productReview), farmerReview: farmerReviewDto(farmerReview) });
     } catch (err) {
       respondWithSafeError(res, err, "Rate order error");
     }
@@ -774,6 +852,7 @@ export default function createSupplyRouter() {
         ? await mongoose.model("User").find({ _id: { $in: ids } }).select("name").lean()
         : [];
       const names = new Map(users.map((u) => [String(u._id), u.name]));
+      const photos = await profilePhotosFor(ids);
       const total = rows.reduce((sum, r) => sum + r.rating, 0);
 
       res.json({
@@ -782,6 +861,7 @@ export default function createSupplyRouter() {
         reviews: rows.map((r) => ({
           id: String(r._id),
           buyerName: names.get(String(r.buyer)) || "Buyer",
+          buyerPhoto: photos.get(String(r.buyer)) || "",
           rating: r.rating,
           message: r.message || "",
           createdAt: r.createdAt,
@@ -789,6 +869,34 @@ export default function createSupplyRouter() {
       });
     } catch (err) {
       respondWithSafeError(res, err, "Load reviews error");
+    }
+  });
+
+  // Buyer/Farmer/Admin: reviews of a farmer account, written by buyers after completed orders.
+  router.get("/farmer-account/:id/reviews", requireRole("buyer", "farmer", "admin"), async (req, res) => {
+    try {
+      if (!isValidId(req.params.id)) return res.status(404).json({ error: "Farmer not found." });
+      const user = await mongoose.model("User").findOne({ _id: req.params.id, role: "farmer" }).select("name").lean();
+      if (!user) return res.status(404).json({ error: "Farmer not found." });
+      const rows = await FarmerReview.find({ farmer: user._id }).sort({ createdAt: -1 }).limit(100).lean();
+      const buyerIds = [...new Set(rows.map((r) => String(r.buyer)))];
+      const buyers = buyerIds.length
+        ? await mongoose.model("User").find({ _id: { $in: buyerIds } }).select("name").lean()
+        : [];
+      const names = new Map(buyers.map((u) => [String(u._id), u.name]));
+      const photos = await profilePhotosFor(buyerIds);
+      const total = rows.reduce((sum, r) => sum + r.rating, 0);
+      res.json({
+        farmerName: user.name || "Farmer",
+        summary: { avg: rows.length ? round1(total / rows.length) : 0, count: rows.length },
+        reviews: rows.map((r) => ({
+          id: String(r._id), buyerName: names.get(String(r.buyer)) || "Buyer",
+          buyerPhoto: photos.get(String(r.buyer)) || "", rating: r.rating,
+          message: r.message || "", createdAt: r.createdAt,
+        })),
+      });
+    } catch (err) {
+      respondWithSafeError(res, err, "Load farmer reviews error");
     }
   });
 
@@ -817,6 +925,8 @@ export default function createSupplyRouter() {
         .limit(60)
         .lean();
       const ratings = await ratingsFor(rows.map((s) => s._id));
+      const overall = await farmerRatingsFor([supply.farmer]);
+      farmer.rating = overall.get(String(supply.farmer)) || NO_RATING;
 
       res.json({ farmer, products: rows.map((s) => publicView(s, farmer.name, ratings.get(String(s._id)))) });
     } catch (err) {
