@@ -1,0 +1,531 @@
+diff --git a/demandRoutes.js b/demandRoutes.js
+index 0d10dc2..d0d47e9 100644
+--- a/demandRoutes.js
++++ b/demandRoutes.js
+@@ -7,6 +7,7 @@ import { readDemandInput, readOfferInput, isValidId, round2 } from "./farmValida
+ import { matchDemandSafe, cancelDemandWithMatches, offerSupplyToDemand } from "./matchingEngine.js";
+ import { businessProfileFor } from "./businessProfile.js";
+ import { breakdownFor, COUNTED_MATCH } from "./demandBreakdown.js";
++import { isValidMatchPhoto } from "./matchPhotoModel.js";
+ 
+ const MAX_ACTIVE_REQUESTS = 100;
+ const NOT_FOUND = { error: "Demand not found." };
+@@ -431,13 +432,19 @@ export default function createDemandRouter() {
+     try {
+       if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
+ 
+-      const { value, error } = readOfferInput(req.body);
++      const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
++      const { image, ...offerBody } = body;
++      if (!isValidMatchPhoto(image)) {
++        return res.status(400).json({ error: "A product photo is required. Upload a JPG, PNG or WEBP photo." });
++      }
++
++      const { value, error } = readOfferInput(offerBody);
+       if (error) return res.status(400).json({ error });
+ 
+       const result = await offerSupplyToDemand({
+         demandId: req.params.id,
+         farmerId: req.user.id,
+-        input: value,
++        input: { ...value, image },
+       });
+       if (result.error) return res.status(result.status).json({ error: result.error });
+ 
+diff --git a/matchPhotoModel.js b/matchPhotoModel.js
+new file mode 100644
+index 0000000..3c8292c
+--- /dev/null
++++ b/matchPhotoModel.js
+@@ -0,0 +1,27 @@
++import mongoose from "mongoose";
++
++// Match photos are private, server-authorized images tied to one Match ID.
++// They are not stored in a public/static directory or exposed as public URLs.
++const matchPhotoSchema = new mongoose.Schema(
++  {
++    match: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
++    farmer: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
++    image: { type: String, required: true },
++  },
++  { timestamps: true }
++);
++
++export const MatchPhoto =
++  mongoose.models.MatchPhoto || mongoose.model("MatchPhoto", matchPhotoSchema, "match_photos");
++
++export const MAX_MATCH_PHOTO_LENGTH = 90_000;
++export const MATCH_PHOTO_DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
++
++export function isValidMatchPhoto(image) {
++  return (
++    typeof image === "string" &&
++    image.length > 0 &&
++    image.length <= MAX_MATCH_PHOTO_LENGTH &&
++    MATCH_PHOTO_DATA_URL_RE.test(image)
++  );
++}
+diff --git a/matchingEngine.js b/matchingEngine.js
+index 9fd4932..472e347 100644
+--- a/matchingEngine.js
++++ b/matchingEngine.js
+@@ -3,6 +3,7 @@ import { Match } from "./matchModel.js";
+ import { round2 } from "./farmValidation.js";
+ import { notify } from "./noticeModel.js";
+ import { breakdownFor } from "./demandBreakdown.js";
++import { MatchPhoto } from "./matchPhotoModel.js";
+ 
+ /* FIFO matching. Supply is allocated oldest-first (createdAt). A match is only
+    POTENTIAL (pending_confirmation); the farmer confirms or declines later.
+@@ -133,8 +134,9 @@ async function allocate(supply, demand, rawQty, opts = {}) {
+     return null;
+   }
+ 
++  let match;
+   try {
+-    const match = await Match.create({
++    match = await Match.create({
+       demand: demand._id,
+       supply: supply._id,
+       farmer: supply.farmer,
+@@ -147,23 +149,36 @@ async function allocate(supply, demand, rawQty, opts = {}) {
+       availabilityDate: supply.availabilityDate,
+       status: "pending_confirmation",
+     });
+-    const kind = kindOf(supply.supplyType);
+-    const note = opts.notice || {
+-      title: "New match request",
+-      message: `A buyer needs ${qty} ${supply.unit} of ${supply.product} (${kind}). Open this notification to accept or decline.`,
+-    };
+-    await notify(supply.farmer, "match_created", note.title, note.message, match._id);
+-    await notify(
+-      demand.buyer, "match_created", "Match found",
+-      `A farmer's ${kind} supply matches your request: ${qty} ${supply.unit} of ${supply.product}. Waiting for the farmer to accept.`,
+-      match._id
+-    );
+-    return match;
++
++    // Request-specific offers include a required private photo. Save it before
++    // sending either party a notification or returning the pending match.
++    if (opts.offerPhoto) {
++      await MatchPhoto.create({ match: match._id, farmer: supply.farmer, image: opts.offerPhoto });
++    }
+   } catch (err) {
++    if (match?._id) {
++      await Promise.allSettled([
++        MatchPhoto.deleteOne({ match: match._id }),
++        Match.deleteOne({ _id: match._id }),
++      ]);
++    }
+     await releaseSupply(supply._id, qty);
+     await unclaimDemand(demand._id, qty);
+     throw err;
+   }
++
++  const kind = kindOf(supply.supplyType);
++  const note = opts.notice || {
++    title: "New match request",
++    message: `A buyer needs ${qty} ${supply.unit} of ${supply.product} (${kind}). Open this notification to accept or decline.`,
++  };
++  await notify(supply.farmer, "match_created", note.title, note.message, match._id);
++  await notify(
++    demand.buyer, "match_created", "Match found",
++    `A farmer's ${kind} supply matches your request: ${qty} ${supply.unit} of ${supply.product}. Waiting for the farmer to accept.`,
++    match._id
++  );
++  return match;
+ }
+ 
+ /* ---- demand-driven: find supply oldest-first for one demand ---- */
+@@ -459,6 +474,7 @@ export async function offerSupplyToDemand({ demandId, farmerId, input }) {
+   let match = null;
+   try {
+     match = await allocate(supply, demand, qty, {
++      offerPhoto: input.image,
+       notice: {
+         title: "Offer submitted",
+         message: `Your offer of ${qty} ${demand.unit} of ${demand.product} was received. Review it in Matches.`,
+diff --git a/orderPhotoRoutes.js b/orderPhotoRoutes.js
+index 2de2c8d..cc1c6aa 100644
+--- a/orderPhotoRoutes.js
++++ b/orderPhotoRoutes.js
+@@ -5,10 +5,9 @@ import { respondWithSafeError } from "./safeErrors.js";
+ import { isValidId } from "./farmValidation.js";
+ import { PreOrderRequest } from "./requestRoutes.js";
+ 
+-/* The farmer's photo of the products, shown on the order made from a confirmed
+-   match. The photo itself is saved in MongoDB (collection "match_photos") when the
+-   farmer accepts the match; "match_orders" links the match to the order. Nothing
+-   is kept in the browser, so it is still there after logging out and in. */
++/* Private product photos are saved in MongoDB (collection "match_photos") and
++   linked to their match. Request-specific offer photos are buyer-only; older
++   general-supply matches retain the existing photo visibility rules. */
+ 
+ const models = () => ({
+   MatchOrder: mongoose.models.MatchOrder,
+@@ -32,15 +31,39 @@ export default function createOrderPhotoRouter() {
+       const links = await MatchOrder.find({ order: { $in: orders.map((o) => o._id) } }).select("match order").lean();
+       if (!links.length) return res.json({ orders: [] });
+ 
+-      const photos = await MatchPhoto.find({ match: { $in: links.map((l) => l.match) } }).select("match").lean();
++      let visibleLinks = links;
++      // Photos submitted with request-specific offers are exposed to the matched
++      // buyer only, including after a pre-order is created. Do not advertise those
++      // photo IDs in the farmer's order list.
++      if (field === "owner") {
++        // Fail closed if the match/supply records cannot be resolved.
++        if (!mongoose.models.Match || !mongoose.models.Supply) return res.json({ orders: [] });
++        const matches = await mongoose.models.Match.find({ _id: { $in: links.map((l) => l.match) } }).select("_id supply").lean();
++        const supplies = matches.length
++          ? await mongoose.models.Supply.find({ _id: { $in: matches.map((m) => m.supply) } }).select("_id targetDemand").lean()
++          : [];
++        const supplyById = new Map(supplies.map((s) => [String(s._id), s]));
++        const generalMatches = new Set(
++          matches
++            .filter((m) => {
++              const supply = supplyById.get(String(m.supply));
++              return Boolean(supply && !supply.targetDemand);
++            })
++            .map((m) => String(m._id))
++        );
++        visibleLinks = links.filter((l) => generalMatches.has(String(l.match)));
++      }
++      if (!visibleLinks.length) return res.json({ orders: [] });
++
++      const photos = await MatchPhoto.find({ match: { $in: visibleLinks.map((l) => l.match) } }).select("match").lean();
+       const withPhoto = new Set(photos.map((p) => String(p.match)));
+-      res.json({ orders: links.filter((l) => withPhoto.has(String(l.match))).map((l) => String(l.order)) });
++      res.json({ orders: visibleLinks.filter((l) => withPhoto.has(String(l.match))).map((l) => String(l.order)) });
+     } catch (err) {
+       respondWithSafeError(res, err, "Load order photos error");
+     }
+   });
+ 
+-  // The photo of one order: only the buyer and the farmer of that order can open it.
++  // Buyer may open the order photo; farmer access is retained only for general-supply matches.
+   router.get("/:orderId", async (req, res) => {
+     try {
+       if (!isValidId(req.params.orderId)) return res.status(404).json({ error: "Photo not found." });
+@@ -54,7 +77,18 @@ export default function createOrderPhotoRouter() {
+       }
+ 
+       const link = await MatchOrder.findOne({ order: order._id }).select("match").lean();
+-      const photo = link ? await MatchPhoto.findOne({ match: link.match }).select("image updatedAt").lean() : null;
++      if (!link) return res.status(404).json({ error: "Photo not found." });
++
++      // Block the farmer from reading photos attached during a request-specific offer.
++      // The matched buyer remains authorized to view the photo for their own order.
++      if (String(order.owner) === uid) {
++        if (!mongoose.models.Match || !mongoose.models.Supply) return res.status(404).json({ error: "Photo not found." });
++        const match = await mongoose.models.Match.findById(link.match).select("supply").lean();
++        const supply = match ? await mongoose.models.Supply.findById(match.supply).select("targetDemand").lean() : null;
++        if (!supply || supply.targetDemand) return res.status(404).json({ error: "Photo not found." });
++      }
++
++      const photo = await MatchPhoto.findOne({ match: link.match }).select("image updatedAt").lean();
+       if (!photo) return res.status(404).json({ error: "Photo not found." });
+ 
+       res.json({ image: photo.image, updatedAt: photo.updatedAt });
+diff --git a/requestRoutes.js b/requestRoutes.js
+index 2e30ea2..4083a4c 100644
+--- a/requestRoutes.js
++++ b/requestRoutes.js
+@@ -4,6 +4,7 @@ import { Supply, Demand } from "./farmModels.js";
+ import { authenticate, writeLimiter } from "./security.js";
+ import { respondWithSafeError } from "./safeErrors.js";
+ import { isValidId, round2 } from "./farmValidation.js";
++import { MatchPhoto, isValidMatchPhoto } from "./matchPhotoModel.js";
+ 
+ /* ---------------- Request model (kept in this file) ---------------- */
+ 
+@@ -51,22 +52,8 @@ const matchOrderSchema = new mongoose.Schema(
+ const MatchOrder =
+   mongoose.models.MatchOrder || mongoose.model("MatchOrder", matchOrderSchema, "match_orders");
+ 
+-// The photo of the products the farmer attaches to a match. The buyer sees it
+-// before pre-ordering.
+-const matchPhotoSchema = new mongoose.Schema(
+-  {
+-    match: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
+-    farmer: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+-    image: { type: String, required: true },
+-  },
+-  { timestamps: true }
+-);
+-const MatchPhoto =
+-  mongoose.models.MatchPhoto || mongoose.model("MatchPhoto", matchPhotoSchema, "match_photos");
+-
+-const IMAGE_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+-// The browser shrinks the photo to about 60 KB. The JSON body limit of this route is 100 KB.
+-const MAX_MATCH_PHOTO = 90_000;
++// MatchPhoto is shared with the request-specific offer endpoint so an offer's
++// required photo is saved and read through the same protected model.
+ 
+ /* ---------------- Helpers ---------------- */
+ 
+@@ -302,8 +289,9 @@ export default function createRequestRouter() {
+     }
+   });
+ 
+-  // Farmer attaches a photo of the products to a match (before or after confirming).
+-  // Body: { image } (a small JPG/PNG/WEBP data URL) or { useListing: true } to use the listing photo.
++  // Legacy/general-supply match photo upload. Request-specific offers already include
++  // their required photo at submission and cannot replace it through this route.
++  // Body: { image } (a small JPG/PNG/WEBP data URL) or { useListing: true } for listing photo.
+   router.post("/matches/:id/photo", writeLimiter, async (req, res) => {
+     try {
+       if (req.user.role !== "farmer") return res.status(403).json({ error: "Only the farmer can add this photo." });
+@@ -314,8 +302,11 @@ export default function createRequestRouter() {
+ 
+       const m = await Model.findById(req.params.id).lean();
+       if (!m) return res.status(404).json({ error: "Match not found." });
+-      const supply = await Supply.findById(m[supplyKey]).select("farmer product image").lean();
++      const supply = await Supply.findById(m[supplyKey]).select("farmer product image targetDemand").lean();
+       if (!supply || String(supply.farmer) !== String(req.user.id)) return res.status(404).json({ error: "Match not found." });
++      if (supply.targetDemand) {
++        return res.status(409).json({ error: "This offer's photo is attached when you submit the offer and cannot be replaced here." });
++      }
+       if (!["pending_confirmation", "confirmed"].includes(m.status)) {
+         return res.status(409).json({ error: "This match is closed." });
+       }
+@@ -326,7 +317,7 @@ export default function createRequestRouter() {
+         if (!image) return res.status(400).json({ error: "This product has no listing photo. Upload a photo." });
+       } else {
+         image = String(req.body?.image || "");
+-        if (!image || image.length > MAX_MATCH_PHOTO || !IMAGE_RE.test(image)) {
++        if (!isValidMatchPhoto(image)) {
+           return res.status(400).json({ error: "Upload a JPG, PNG or WEBP photo." });
+         }
+       }
+@@ -362,7 +353,7 @@ export default function createRequestRouter() {
+     }
+   });
+ 
+-  // The photo of a match: the buyer who owns the requirement or the farmer who owns the supply.
++  // The matched buyer can view their photo. Farmers can view photos only for older general-supply matches.
+   router.get("/matches/:id/photo", async (req, res) => {
+     try {
+       if (!isValidId(req.params.id)) return res.status(404).json({ error: "Match not found." });
+@@ -374,10 +365,12 @@ export default function createRequestRouter() {
+       if (!m) return res.status(404).json({ error: "Match not found." });
+       const [demand, supply] = await Promise.all([
+         Demand.findById(m[demandKey]).select("buyer").lean(),
+-        Supply.findById(m[supplyKey]).select("farmer").lean(),
++        Supply.findById(m[supplyKey]).select("farmer targetDemand").lean(),
+       ]);
+       const buyerOk = req.user.role === "buyer" && demand && String(demand.buyer) === String(req.user.id);
+-      const farmerOk = req.user.role === "farmer" && supply && String(supply.farmer) === String(req.user.id);
++      // Request-specific offer photos are for the matched buyer only. For older,
++      // general-supply matches, preserve the existing farmer-side photo workflow.
++      const farmerOk = req.user.role === "farmer" && supply && !supply.targetDemand && String(supply.farmer) === String(req.user.id);
+       if (!buyerOk && !farmerOk) return res.status(404).json({ error: "Match not found." });
+ 
+       const p = await MatchPhoto.findOne({ match: m._id }).select("image").lean();
+diff --git a/src/components/OfferSupplyForm.jsx b/src/components/OfferSupplyForm.jsx
+index 4c754ed..104a52c 100644
+--- a/src/components/OfferSupplyForm.jsx
++++ b/src/components/OfferSupplyForm.jsx
+@@ -1,18 +1,44 @@
+-import { useState } from "react";
++import { useRef, useState } from "react";
+ import { Field, Notice, ActionButton, FIELD_CLASS, formatQty } from "./FormBits.jsx";
+ import { SUPPLY_TYPES } from "../models/supply/Supply";
+ import { todayISO } from "../models/common";
+ import { demandProgress } from "../models/demand/progress";
+ import useOfferSupplyViewModel from "../viewmodels/useOfferSupplyViewModel";
++import { shrinkPhoto } from "../utils/shrinkPhoto.js";
+ 
+ const FieldError = ({ message }) =>
+   message ? <p className="mt-1 text-[12px] text-red-600">{message}</p> : null;
+ 
+ export default function OfferSupplyForm({ demand, onOffered }) {
+   const vm = useOfferSupplyViewModel(demand, onOffered);
+-  const [form, setForm] = useState({ quantity: "", supplyType: "onhand", availabilityDate: "" });
++  const [form, setForm] = useState({ quantity: "", supplyType: "onhand", availabilityDate: "", image: "" });
++  const [photoBusy, setPhotoBusy] = useState(false);
++  const [photoError, setPhotoError] = useState("");
++  const photoInputRef = useRef(null);
+   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+ 
++  async function pickPhoto(file) {
++    if (!file) return;
++    setPhotoBusy(true);
++    setPhotoError("");
++    setForm((f) => ({ ...f, image: "" }));
++    try {
++      // Keep the data URL comfortably within the API's 90 KB photo limit.
++      const image = await shrinkPhoto(file, 68000);
++      setForm((f) => ({ ...f, image }));
++    } catch (err) {
++      setPhotoError(err?.message || "Could not read that photo.");
++    } finally {
++      setPhotoBusy(false);
++    }
++  }
++
++  function removePhoto() {
++    setForm((f) => ({ ...f, image: "" }));
++    setPhotoError("");
++    if (photoInputRef.current) photoInputRef.current.value = "";
++  }
++
+   const { remaining } = demandProgress(demand);
+   const expected = form.supplyType === "expected";
+   const closed = !["open", "potential_match", "partially_matched"].includes(demand.status);
+@@ -41,7 +67,7 @@ export default function OfferSupplyForm({ demand, onOffered }) {
+             vm.submit(form);
+           }}
+         >
+-          <fieldset disabled={vm.submitting} className="space-y-3">
++          <fieldset disabled={vm.submitting || photoBusy} className="space-y-3">
+             <div className="grid grid-cols-2 gap-3">
+               <Field label="Product (from this request)" htmlFor="of-product">
+                 <input id="of-product" className={FIELD_CLASS} value={demand.product} readOnly />
+@@ -108,6 +134,41 @@ export default function OfferSupplyForm({ demand, onOffered }) {
+               />
+               <FieldError message={vm.fieldErrors.availabilityDate} />
+             </Field>
++
++            <Field
++              label="Photo of the product (required)"
++              htmlFor="of-image"
++              hint="Upload a clear photo of the product you are offering. Only the buyer for this request can view it."
++            >
++              <input
++                ref={photoInputRef}
++                id="of-image"
++                type="file"
++                accept="image/jpeg,image/png,image/webp"
++                disabled={photoBusy || vm.submitting}
++                className={FIELD_CLASS + ((vm.fieldErrors.image && !form.image) || photoError ? " !border-red-400" : "")}
++                onChange={(e) => {
++                  const file = e.target.files?.[0];
++                  e.target.value = "";
++                  if (file) pickPhoto(file);
++                }}
++              />
++              {form.image && (
++                <div className="mt-2 rounded-xl border border-[#DCE7DC] p-2.5">
++                  <div className="flex items-center gap-3">
++                    <img src={form.image} alt="Preview of the product offered" className="h-20 w-20 shrink-0 rounded-lg object-cover" />
++                    <div className="min-w-0 flex-1">
++                      <p className="text-[12.5px] font-semibold text-[#1B5E20]">Photo ready to send</p>
++                      <p className="mt-0.5 text-[11.5px] text-gray-500">This photo will be attached to this offer.</p>
++                      <button type="button" onClick={removePhoto} className="mt-1 text-[12px] font-semibold text-gray-500 hover:underline">
++                        Remove photo
++                      </button>
++                    </div>
++                  </div>
++                </div>
++              )}
++              <FieldError message={(vm.fieldErrors.image && !form.image) ? vm.fieldErrors.image : photoError} />
++            </Field>
+           </fieldset>
+ 
+           <p className="rounded-lg bg-[#F4F7F3] p-2.5 text-[12px] text-gray-600">
+@@ -116,8 +177,8 @@ export default function OfferSupplyForm({ demand, onOffered }) {
+           </p>
+ 
+           <Notice>{vm.error}</Notice>
+-          <ActionButton type="submit" disabled={vm.submitting}>
+-            {vm.submitting ? "Submitting..." : "Submit Offer"}
++          <ActionButton type="submit" disabled={vm.submitting || photoBusy}>
++            {photoBusy ? "Preparing photo..." : vm.submitting ? "Submitting..." : "Submit Offer"}
+           </ActionButton>
+         </form>
+       )}
+diff --git a/src/viewmodels/useOfferSupplyViewModel.js b/src/viewmodels/useOfferSupplyViewModel.js
+index 18e32cb..0fe0102 100644
+--- a/src/viewmodels/useOfferSupplyViewModel.js
++++ b/src/viewmodels/useOfferSupplyViewModel.js
+@@ -24,6 +24,9 @@ export default function useOfferSupplyViewModel(demand, onOffered) {
+     if (!SUPPLY_TYPES.some((t) => t.id === form.supplyType)) {
+       e.supplyType = "Please choose a supply type.";
+     }
++    if (!form.image) {
++      e.image = "Upload a photo of the product before submitting the offer.";
++    }
+ 
+     const quantityError = checkQuantity(form.quantity);
+     if (quantityError) {
+@@ -70,6 +73,7 @@ export default function useOfferSupplyViewModel(demand, onOffered) {
+         quantity: Number(form.quantity),
+         supplyType: form.supplyType,
+         availabilityDate: form.availabilityDate,
++        image: form.image,
+       });
+       setSubmitted(true);
+       setSuccess(SUCCESS_MESSAGE);
+diff --git a/src/views/buyer/BuyerMatches.jsx b/src/views/buyer/BuyerMatches.jsx
+index ea32f3f..3adefd4 100644
+--- a/src/views/buyer/BuyerMatches.jsx
++++ b/src/views/buyer/BuyerMatches.jsx
+@@ -37,8 +37,8 @@ function defaultNeeded(m) {
+   return n && n >= todayStr() ? n : todayStr();
+ }
+ 
+-/* Photo at the left of each match: the farmer's photo of the products when there is
+-   one (green ring), otherwise the product's listing photo. */
++/* Photo at the left of each match: the private offer photo when one exists,
++   otherwise the product listing photo. The API authorizes the matched buyer only. */
+ function MatchThumb({ m }) {
+   const [photo, setPhoto] = useState("");
+   const [failed, setFailed] = useState(false);
+@@ -84,7 +84,7 @@ function MatchDetails({ m, onClose, onDone, onNavigate }) {
+   const [failed, setFailed] = useState(false);
+   const [farmerPhoto, setFarmerPhoto] = useState("");
+ 
+-  // The photo of the products the farmer attached when confirming.
++  // The product photo attached to the offer or saved for a general-supply match.
+   useEffect(() => {
+     let alive = true;
+     if (m.hasPhoto) {
+diff --git a/src/views/farmer/FarmerMatches.jsx b/src/views/farmer/FarmerMatches.jsx
+index 470c74c..0565a54 100644
+--- a/src/views/farmer/FarmerMatches.jsx
++++ b/src/views/farmer/FarmerMatches.jsx
+@@ -240,6 +240,23 @@ export default function FarmerMatches(props) {
+     await load();
+   }
+ 
++  // A request-specific offer already contains its required photo. The farmer
++  // should confirm that pending match directly rather than being asked to upload it again.
++  async function acceptWithExistingPhoto(m) {
++    if (busyId) return;
++    setBusyId(m.id);
++    setActionError("");
++    setNote("");
++    try {
++      await matchRepository.confirm(m.id);
++      setNote("Match accepted. The buyer can now see your photo and pre-order.");
++    } catch (e) {
++      setActionError(getUserMessage(e));
++    }
++    await load();
++    setBusyId(null);
++  }
++
+   // If the new list cannot be loaded, show the old page when it was renamed to FarmerMatchesOld.jsx.
+   if (fallback) {
+     if (FarmerMatchesOld) return <FarmerMatchesOld {...props} />;
+@@ -287,15 +304,17 @@ export default function FarmerMatches(props) {
+ 
+                     {pending && (
+                       <>
++                        {m.hasPhoto && <span className="rounded-full bg-green-100 px-2.5 py-1 text-[11.5px] font-semibold text-green-800">Photo attached</span>}
+                         <button type="button" disabled={busyId === m.id} onClick={() => decline(m)} className={grayBtn + " disabled:opacity-60"}>
+                           Decline
+                         </button>
+                         <button
+                           type="button"
+-                          onClick={() => setPhotoFor(m)}
+-                          className="rounded-md bg-[#1B5E20] px-3 py-2 text-[13px] font-semibold text-white hover:brightness-110"
++                          disabled={busyId === m.id}
++                          onClick={() => m.hasPhoto ? acceptWithExistingPhoto(m) : setPhotoFor(m)}
++                          className="rounded-md bg-[#1B5E20] px-3 py-2 text-[13px] font-semibold text-white hover:brightness-110 disabled:opacity-60"
+                         >
+-                          Accept
++                          {busyId === m.id ? "Accepting..." : "Accept"}
+                         </button>
+                       </>
+                     )}

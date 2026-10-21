@@ -1,17 +1,43 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Field, Notice, ActionButton, FIELD_CLASS, formatQty } from "./FormBits.jsx";
 import { SUPPLY_TYPES } from "../models/supply/Supply";
 import { todayISO } from "../models/common";
 import { demandProgress } from "../models/demand/progress";
 import useOfferSupplyViewModel from "../viewmodels/useOfferSupplyViewModel";
+import { shrinkPhoto } from "../utils/shrinkPhoto.js";
 
 const FieldError = ({ message }) =>
   message ? <p className="mt-1 text-[12px] text-red-600">{message}</p> : null;
 
 export default function OfferSupplyForm({ demand, onOffered }) {
   const vm = useOfferSupplyViewModel(demand, onOffered);
-  const [form, setForm] = useState({ quantity: "", supplyType: "onhand", availabilityDate: "" });
+  const [form, setForm] = useState({ quantity: "", supplyType: "onhand", availabilityDate: "", image: "" });
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoError, setPhotoError] = useState("");
+  const photoInputRef = useRef(null);
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  async function pickPhoto(file) {
+    if (!file) return;
+    setPhotoBusy(true);
+    setPhotoError("");
+    setForm((f) => ({ ...f, image: "" }));
+    try {
+      // Keep the data URL comfortably within the API's 90 KB photo limit.
+      const image = await shrinkPhoto(file, 68000);
+      setForm((f) => ({ ...f, image }));
+    } catch (err) {
+      setPhotoError(err?.message || "Could not read that photo.");
+    } finally {
+      setPhotoBusy(false);
+    }
+  }
+
+  function removePhoto() {
+    setForm((f) => ({ ...f, image: "" }));
+    setPhotoError("");
+    if (photoInputRef.current) photoInputRef.current.value = "";
+  }
 
   const { remaining } = demandProgress(demand);
   const expected = form.supplyType === "expected";
@@ -41,7 +67,7 @@ export default function OfferSupplyForm({ demand, onOffered }) {
             vm.submit(form);
           }}
         >
-          <fieldset disabled={vm.submitting} className="space-y-3">
+          <fieldset disabled={vm.submitting || photoBusy} className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
               <Field label="Product (from this request)" htmlFor="of-product">
                 <input id="of-product" className={FIELD_CLASS} value={demand.product} readOnly />
@@ -108,6 +134,41 @@ export default function OfferSupplyForm({ demand, onOffered }) {
               />
               <FieldError message={vm.fieldErrors.availabilityDate} />
             </Field>
+
+            <Field
+              label="Photo of the product (required)"
+              htmlFor="of-image"
+              hint="Upload a clear photo of the product you are offering. Only the buyer for this request can view it."
+            >
+              <input
+                ref={photoInputRef}
+                id="of-image"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                disabled={photoBusy || vm.submitting}
+                className={FIELD_CLASS + ((vm.fieldErrors.image && !form.image) || photoError ? " !border-red-400" : "")}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (file) pickPhoto(file);
+                }}
+              />
+              {form.image && (
+                <div className="mt-2 rounded-xl border border-[#DCE7DC] p-2.5">
+                  <div className="flex items-center gap-3">
+                    <img src={form.image} alt="Preview of the product offered" className="h-20 w-20 shrink-0 rounded-lg object-cover" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[12.5px] font-semibold text-[#1B5E20]">Photo ready to send</p>
+                      <p className="mt-0.5 text-[11.5px] text-gray-500">This photo will be attached to this offer.</p>
+                      <button type="button" onClick={removePhoto} className="mt-1 text-[12px] font-semibold text-gray-500 hover:underline">
+                        Remove photo
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <FieldError message={(vm.fieldErrors.image && !form.image) ? vm.fieldErrors.image : photoError} />
+            </Field>
           </fieldset>
 
           <p className="rounded-lg bg-[#F4F7F3] p-2.5 text-[12px] text-gray-600">
@@ -116,8 +177,8 @@ export default function OfferSupplyForm({ demand, onOffered }) {
           </p>
 
           <Notice>{vm.error}</Notice>
-          <ActionButton type="submit" disabled={vm.submitting}>
-            {vm.submitting ? "Submitting..." : "Submit Offer"}
+          <ActionButton type="submit" disabled={vm.submitting || photoBusy}>
+            {photoBusy ? "Preparing photo..." : vm.submitting ? "Submitting..." : "Submit Offer"}
           </ActionButton>
         </form>
       )}

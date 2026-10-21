@@ -246,7 +246,7 @@ export default function App() {
   const showPlus =
     user.role !== "admin" &&
     (activePage === "demands" || (activePage === "supply" && user.role === "farmer"));
-  const plusLabel = activePage === "supply" ? "Add Supply" : "Create New Requirement";
+  const plusLabel = activePage === "supply" ? "Add Supply" : "Create a Demand";
   const headerActions = showPlus ? (
     <button
       type="button"

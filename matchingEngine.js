@@ -3,6 +3,7 @@ import { Match } from "./matchModel.js";
 import { round2 } from "./farmValidation.js";
 import { notify } from "./noticeModel.js";
 import { breakdownFor } from "./demandBreakdown.js";
+import { MatchPhoto } from "./matchPhotoModel.js";
 
 /* FIFO matching. Supply is allocated oldest-first (createdAt). A match is only
    POTENTIAL (pending_confirmation); the farmer confirms or declines later.
@@ -133,8 +134,9 @@ async function allocate(supply, demand, rawQty, opts = {}) {
     return null;
   }
 
+  let match;
   try {
-    const match = await Match.create({
+    match = await Match.create({
       demand: demand._id,
       supply: supply._id,
       farmer: supply.farmer,
@@ -147,23 +149,36 @@ async function allocate(supply, demand, rawQty, opts = {}) {
       availabilityDate: supply.availabilityDate,
       status: "pending_confirmation",
     });
-    const kind = kindOf(supply.supplyType);
-    const note = opts.notice || {
-      title: "New match request",
-      message: `A buyer needs ${qty} ${supply.unit} of ${supply.product} (${kind}). Open this notification to accept or decline.`,
-    };
-    await notify(supply.farmer, "match_created", note.title, note.message, match._id);
-    await notify(
-      demand.buyer, "match_created", "Match found",
-      `A farmer's ${kind} supply matches your request: ${qty} ${supply.unit} of ${supply.product}. Waiting for the farmer to accept.`,
-      match._id
-    );
-    return match;
+
+    // Request-specific offers include a required private photo. Save it before
+    // sending either party a notification or returning the pending match.
+    if (opts.offerPhoto) {
+      await MatchPhoto.create({ match: match._id, farmer: supply.farmer, image: opts.offerPhoto });
+    }
   } catch (err) {
+    if (match?._id) {
+      await Promise.allSettled([
+        MatchPhoto.deleteOne({ match: match._id }),
+        Match.deleteOne({ _id: match._id }),
+      ]);
+    }
     await releaseSupply(supply._id, qty);
     await unclaimDemand(demand._id, qty);
     throw err;
   }
+
+  const kind = kindOf(supply.supplyType);
+  const note = opts.notice || {
+    title: "New match request",
+    message: `A buyer needs ${qty} ${supply.unit} of ${supply.product} (${kind}). Open this notification to accept or decline.`,
+  };
+  await notify(supply.farmer, "match_created", note.title, note.message, match._id);
+  await notify(
+    demand.buyer, "match_created", "Match found",
+    `A farmer's ${kind} supply matches your request: ${qty} ${supply.unit} of ${supply.product}. Waiting for the farmer to accept.`,
+    match._id
+  );
+  return match;
 }
 
 /* ---- demand-driven: find supply oldest-first for one demand ---- */
@@ -459,6 +474,7 @@ export async function offerSupplyToDemand({ demandId, farmerId, input }) {
   let match = null;
   try {
     match = await allocate(supply, demand, qty, {
+      offerPhoto: input.image,
       notice: {
         title: "Offer submitted",
         message: `Your offer of ${qty} ${demand.unit} of ${demand.product} was received. Review it in Matches.`,

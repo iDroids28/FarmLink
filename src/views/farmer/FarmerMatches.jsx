@@ -69,6 +69,58 @@ function Thumb({ src, alt }) {
   );
 }
 
+/* The image attached to a request-specific offer is private. Load it through
+   the authorized match-photo endpoint instead of relying on a public image URL. */
+function MatchOfferPhoto({ m }) {
+  const [photo, setPhoto] = useState("");
+  const [loading, setLoading] = useState(Boolean(m.hasPhoto));
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setPhoto("");
+    setFailed(false);
+    setLoading(Boolean(m.hasPhoto));
+
+    if (!m.hasPhoto) {
+      return () => { active = false; };
+    }
+
+    matchOrderApi.photo(m.id)
+      .then((data) => {
+        if (!active) return;
+        if (data?.image) setPhoto(data.image);
+        else setFailed(true);
+      })
+      .catch(() => { if (active) setFailed(true); })
+      .finally(() => { if (active) setLoading(false); });
+
+    return () => { active = false; };
+  }, [m.id, m.hasPhoto]);
+
+  if (!m.hasPhoto) return null;
+
+  return (
+    <div className="mb-4">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <p className="flex items-center gap-1.5 text-[13px] font-semibold text-[#16301F]">
+          <Camera size={15} className="text-[#2E7D32]" /> Product photo you uploaded
+        </p>
+        <span className="rounded-full bg-green-100 px-2.5 py-1 text-[11px] font-semibold text-green-800">Attached to this offer</span>
+      </div>
+      <div className="flex h-48 w-full items-center justify-center overflow-hidden rounded-xl border border-black/5 bg-gray-50 sm:h-56">
+        {photo && !failed ? (
+          <img src={photo} alt={`${m.product} product photo`} onError={() => setFailed(true)} className="h-full w-full object-contain" />
+        ) : loading ? (
+          <span className="text-[12.5px] text-gray-500">Loading your uploaded photo…</span>
+        ) : failed ? (
+          <span className="px-4 text-center text-[12.5px] text-gray-500">Could not load this photo. Refresh the page and try again.</span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Accept a match (or add a photo to a confirmed one) with the products' photo ---------- */
 function PhotoModal({ m, onClose, onDone }) {
   const pending = m.status === "pending_confirmation";
@@ -240,6 +292,23 @@ export default function FarmerMatches(props) {
     await load();
   }
 
+  // A request-specific offer already contains its required photo. The farmer
+  // should confirm that pending match directly rather than being asked to upload it again.
+  async function acceptWithExistingPhoto(m) {
+    if (busyId) return;
+    setBusyId(m.id);
+    setActionError("");
+    setNote("");
+    try {
+      await matchRepository.confirm(m.id);
+      setNote("Match accepted. The buyer can now see your photo and pre-order.");
+    } catch (e) {
+      setActionError(getUserMessage(e));
+    }
+    await load();
+    setBusyId(null);
+  }
+
   // If the new list cannot be loaded, show the old page when it was renamed to FarmerMatchesOld.jsx.
   if (fallback) {
     if (FarmerMatchesOld) return <FarmerMatchesOld {...props} />;
@@ -255,7 +324,7 @@ export default function FarmerMatches(props) {
     <div className="space-y-6">
       <PageHeader
         title="Matches"
-        subtitle="Buyers' requirements matched with your supply. Accept a match and attach a photo of the products: the buyer sees it before they pre-order."
+        subtitle="Review matched requests, check the product photo attached to each offer, then accept or decline the match."
       />
       <LoadNote loading={rows === null && !error} error="" />
       <Notice type="error">{actionError}</Notice>
@@ -270,8 +339,9 @@ export default function FarmerMatches(props) {
             const confirmed = m.status === "confirmed";
             return (
               <div key={m.id} className="rounded-2xl border border-black/5 bg-white p-4 shadow-sm">
+                {pending && m.hasPhoto && <MatchOfferPhoto m={m} />}
                 <div className="flex flex-wrap items-center gap-4">
-                  <Thumb src={m.image} alt={m.product} />
+                  {!(pending && m.hasPhoto) && <Thumb src={m.image} alt={m.product} />}
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-[15.5px] font-bold text-[#16301F]">{m.product}</p>
                     <p className="text-[12.5px] text-gray-500">
@@ -287,15 +357,17 @@ export default function FarmerMatches(props) {
 
                     {pending && (
                       <>
+                        {m.hasPhoto && <span className="rounded-full bg-green-100 px-2.5 py-1 text-[11.5px] font-semibold text-green-800">Photo attached</span>}
                         <button type="button" disabled={busyId === m.id} onClick={() => decline(m)} className={grayBtn + " disabled:opacity-60"}>
                           Decline
                         </button>
                         <button
                           type="button"
-                          onClick={() => setPhotoFor(m)}
-                          className="rounded-md bg-[#1B5E20] px-3 py-2 text-[13px] font-semibold text-white hover:brightness-110"
+                          disabled={busyId === m.id}
+                          onClick={() => m.hasPhoto ? acceptWithExistingPhoto(m) : setPhotoFor(m)}
+                          className="rounded-md bg-[#1B5E20] px-3 py-2 text-[13px] font-semibold text-white hover:brightness-110 disabled:opacity-60"
                         >
-                          Accept
+                          {busyId === m.id ? "Accepting..." : "Accept"}
                         </button>
                       </>
                     )}

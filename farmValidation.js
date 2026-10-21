@@ -5,6 +5,14 @@ import { SAFE_MESSAGES } from "./safeErrors.js";
 
 export const UNITS = ["kg", "ton", "sack", "crate", "piece", "bundle", "ml", "liter", "gal", "bottle", "tray", "dozen"];
 export const SUPPLY_TYPES = ["onhand", "expected"];
+const DEMAND_PRODUCT_RE = /^\p{L}{2,60}$/u;
+const DEMAND_CATEGORIES = [
+  "Vegetables", "Fruits", "Rice", "Corn & Grains", "Root Crops", "Legumes & Beans",
+  "Herbs & Spices", "Mushrooms", "Coconut Products", "Coffee & Cacao", "Sugarcane",
+  "Dairy & Milk", "Eggs", "Livestock", "Poultry", "Meat", "Fish & Seafood",
+  "Honey & Bee Products", "Seeds & Seedlings", "Flowers & Ornamental Plants",
+  "Fiber Crops", "Farm By-products", "Other Farm Products",
+];
 
 const TEXT_RE = /^[\p{L}\p{N}\s.,'()-]+$/u;
 const ID_RE = /^[a-f\d]{24}$/i;
@@ -100,20 +108,28 @@ export function readSupplyInput(body) {
 }
 
 export function readDemandInput(body) {
-  const allowed = ["product", "quantity", "unit", "neededDate", "location"];
+  const allowed = ["product", "category", "quantity", "unit", "neededDate", "location"];
   if (!hasOnlyKeys(body, allowed)) return { error: SAFE_MESSAGES.unprocessed };
   if (!UNITS.includes(body.unit)) return { error: "Please choose a valid unit." };
+  if (!DEMAND_CATEGORIES.includes(body.category)) return { error: "Please choose a valid farm-product category." };
 
-  const product = cleanText(body.product, "Product", 60);
+  const product = typeof body.product === "string" ? body.product.trim() : "";
+  if (!DEMAND_PRODUCT_RE.test(product)) {
+    return { error: "Product name must contain 2–60 letters only, with no spaces, numbers, or special characters." };
+  }
   const quantity = cleanQuantity(body.quantity);
+  if (quantity.error) return { error: quantity.error };
+  if (quantity.value < 25) return { error: `Minimum demand quantity is 25 ${body.unit}.` };
+
   const date = cleanDate(body.neededDate, "the needed date", -1, 730, "The needed date cannot be in the past.");
   const location = cleanText(body.location, "Location", 100);
-
-  const error = firstError([product, quantity, date, location]);
+  const error = firstError([date, location]);
   if (error) return { error };
+
   return {
     value: {
-      product: product.value,
+      product,
+      category: body.category,
       quantity: quantity.value,
       unit: body.unit,
       neededDate: date.value,

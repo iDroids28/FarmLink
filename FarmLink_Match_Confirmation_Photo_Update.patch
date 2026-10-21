@@ -1,0 +1,100 @@
+diff --git a/requestRoutes.js b/requestRoutes.js
+index 4083a4c..e738be1 100644
+--- a/requestRoutes.js
++++ b/requestRoutes.js
+@@ -368,9 +368,9 @@ export default function createRequestRouter() {
+         Supply.findById(m[supplyKey]).select("farmer targetDemand").lean(),
+       ]);
+       const buyerOk = req.user.role === "buyer" && demand && String(demand.buyer) === String(req.user.id);
+-      // Request-specific offer photos are for the matched buyer only. For older,
+-      // general-supply matches, preserve the existing farmer-side photo workflow.
+-      const farmerOk = req.user.role === "farmer" && supply && !supply.targetDemand && String(supply.farmer) === String(req.user.id);
++      // The matched buyer and the farmer who owns this exact supply may view this
++      // private photo. Other buyers/farmers cannot read it by guessing the match ID.
++      const farmerOk = req.user.role === "farmer" && supply && String(supply.farmer) === String(req.user.id);
+       if (!buyerOk && !farmerOk) return res.status(404).json({ error: "Match not found." });
+ 
+       const p = await MatchPhoto.findOne({ match: m._id }).select("image").lean();
+diff --git a/src/views/farmer/FarmerMatches.jsx b/src/views/farmer/FarmerMatches.jsx
+index 0565a54..7f00a0b 100644
+--- a/src/views/farmer/FarmerMatches.jsx
++++ b/src/views/farmer/FarmerMatches.jsx
+@@ -69,6 +69,58 @@ function Thumb({ src, alt }) {
+   );
+ }
+ 
++/* The image attached to a request-specific offer is private. Load it through
++   the authorized match-photo endpoint instead of relying on a public image URL. */
++function MatchOfferPhoto({ m }) {
++  const [photo, setPhoto] = useState("");
++  const [loading, setLoading] = useState(Boolean(m.hasPhoto));
++  const [failed, setFailed] = useState(false);
++
++  useEffect(() => {
++    let active = true;
++    setPhoto("");
++    setFailed(false);
++    setLoading(Boolean(m.hasPhoto));
++
++    if (!m.hasPhoto) {
++      return () => { active = false; };
++    }
++
++    matchOrderApi.photo(m.id)
++      .then((data) => {
++        if (!active) return;
++        if (data?.image) setPhoto(data.image);
++        else setFailed(true);
++      })
++      .catch(() => { if (active) setFailed(true); })
++      .finally(() => { if (active) setLoading(false); });
++
++    return () => { active = false; };
++  }, [m.id, m.hasPhoto]);
++
++  if (!m.hasPhoto) return null;
++
++  return (
++    <div className="mb-4">
++      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
++        <p className="flex items-center gap-1.5 text-[13px] font-semibold text-[#16301F]">
++          <Camera size={15} className="text-[#2E7D32]" /> Product photo you uploaded
++        </p>
++        <span className="rounded-full bg-green-100 px-2.5 py-1 text-[11px] font-semibold text-green-800">Attached to this offer</span>
++      </div>
++      <div className="flex h-48 w-full items-center justify-center overflow-hidden rounded-xl border border-black/5 bg-gray-50 sm:h-56">
++        {photo && !failed ? (
++          <img src={photo} alt={`${m.product} product photo`} onError={() => setFailed(true)} className="h-full w-full object-contain" />
++        ) : loading ? (
++          <span className="text-[12.5px] text-gray-500">Loading your uploaded photo…</span>
++        ) : failed ? (
++          <span className="px-4 text-center text-[12.5px] text-gray-500">Could not load this photo. Refresh the page and try again.</span>
++        ) : null}
++      </div>
++    </div>
++  );
++}
++
+ /* ---------- Accept a match (or add a photo to a confirmed one) with the products' photo ---------- */
+ function PhotoModal({ m, onClose, onDone }) {
+   const pending = m.status === "pending_confirmation";
+@@ -272,7 +324,7 @@ export default function FarmerMatches(props) {
+     <div className="space-y-6">
+       <PageHeader
+         title="Matches"
+-        subtitle="Buyers' requirements matched with your supply. Accept a match and attach a photo of the products: the buyer sees it before they pre-order."
++        subtitle="Review matched requests, check the product photo attached to each offer, then accept or decline the match."
+       />
+       <LoadNote loading={rows === null && !error} error="" />
+       <Notice type="error">{actionError}</Notice>
+@@ -287,8 +339,9 @@ export default function FarmerMatches(props) {
+             const confirmed = m.status === "confirmed";
+             return (
+               <div key={m.id} className="rounded-2xl border border-black/5 bg-white p-4 shadow-sm">
++                {pending && m.hasPhoto && <MatchOfferPhoto m={m} />}
+                 <div className="flex flex-wrap items-center gap-4">
+-                  <Thumb src={m.image} alt={m.product} />
++                  {!(pending && m.hasPhoto) && <Thumb src={m.image} alt={m.product} />}
+                   <div className="min-w-0 flex-1">
+                     <p className="truncate text-[15.5px] font-bold text-[#16301F]">{m.product}</p>
+                     <p className="text-[12.5px] text-gray-500">

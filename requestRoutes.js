@@ -4,6 +4,7 @@ import { Supply, Demand } from "./farmModels.js";
 import { authenticate, writeLimiter } from "./security.js";
 import { respondWithSafeError } from "./safeErrors.js";
 import { isValidId, round2 } from "./farmValidation.js";
+import { MatchPhoto, isValidMatchPhoto } from "./matchPhotoModel.js";
 
 /* ---------------- Request model (kept in this file) ---------------- */
 
@@ -51,22 +52,8 @@ const matchOrderSchema = new mongoose.Schema(
 const MatchOrder =
   mongoose.models.MatchOrder || mongoose.model("MatchOrder", matchOrderSchema, "match_orders");
 
-// The photo of the products the farmer attaches to a match. The buyer sees it
-// before pre-ordering.
-const matchPhotoSchema = new mongoose.Schema(
-  {
-    match: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
-    farmer: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
-    image: { type: String, required: true },
-  },
-  { timestamps: true }
-);
-const MatchPhoto =
-  mongoose.models.MatchPhoto || mongoose.model("MatchPhoto", matchPhotoSchema, "match_photos");
-
-const IMAGE_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
-// The browser shrinks the photo to about 60 KB. The JSON body limit of this route is 100 KB.
-const MAX_MATCH_PHOTO = 90_000;
+// MatchPhoto is shared with the request-specific offer endpoint so an offer's
+// required photo is saved and read through the same protected model.
 
 /* ---------------- Helpers ---------------- */
 
@@ -302,8 +289,9 @@ export default function createRequestRouter() {
     }
   });
 
-  // Farmer attaches a photo of the products to a match (before or after confirming).
-  // Body: { image } (a small JPG/PNG/WEBP data URL) or { useListing: true } to use the listing photo.
+  // Legacy/general-supply match photo upload. Request-specific offers already include
+  // their required photo at submission and cannot replace it through this route.
+  // Body: { image } (a small JPG/PNG/WEBP data URL) or { useListing: true } for listing photo.
   router.post("/matches/:id/photo", writeLimiter, async (req, res) => {
     try {
       if (req.user.role !== "farmer") return res.status(403).json({ error: "Only the farmer can add this photo." });
@@ -314,8 +302,11 @@ export default function createRequestRouter() {
 
       const m = await Model.findById(req.params.id).lean();
       if (!m) return res.status(404).json({ error: "Match not found." });
-      const supply = await Supply.findById(m[supplyKey]).select("farmer product image").lean();
+      const supply = await Supply.findById(m[supplyKey]).select("farmer product image targetDemand").lean();
       if (!supply || String(supply.farmer) !== String(req.user.id)) return res.status(404).json({ error: "Match not found." });
+      if (supply.targetDemand) {
+        return res.status(409).json({ error: "This offer's photo is attached when you submit the offer and cannot be replaced here." });
+      }
       if (!["pending_confirmation", "confirmed"].includes(m.status)) {
         return res.status(409).json({ error: "This match is closed." });
       }
@@ -326,7 +317,7 @@ export default function createRequestRouter() {
         if (!image) return res.status(400).json({ error: "This product has no listing photo. Upload a photo." });
       } else {
         image = String(req.body?.image || "");
-        if (!image || image.length > MAX_MATCH_PHOTO || !IMAGE_RE.test(image)) {
+        if (!isValidMatchPhoto(image)) {
           return res.status(400).json({ error: "Upload a JPG, PNG or WEBP photo." });
         }
       }
@@ -362,7 +353,7 @@ export default function createRequestRouter() {
     }
   });
 
-  // The photo of a match: the buyer who owns the requirement or the farmer who owns the supply.
+  // The matched buyer can view their photo. Farmers can view photos only for older general-supply matches.
   router.get("/matches/:id/photo", async (req, res) => {
     try {
       if (!isValidId(req.params.id)) return res.status(404).json({ error: "Match not found." });
@@ -374,9 +365,11 @@ export default function createRequestRouter() {
       if (!m) return res.status(404).json({ error: "Match not found." });
       const [demand, supply] = await Promise.all([
         Demand.findById(m[demandKey]).select("buyer").lean(),
-        Supply.findById(m[supplyKey]).select("farmer").lean(),
+        Supply.findById(m[supplyKey]).select("farmer targetDemand").lean(),
       ]);
       const buyerOk = req.user.role === "buyer" && demand && String(demand.buyer) === String(req.user.id);
+      // The matched buyer and the farmer who owns this exact supply may view this
+      // private photo. Other buyers/farmers cannot read it by guessing the match ID.
       const farmerOk = req.user.role === "farmer" && supply && String(supply.farmer) === String(req.user.id);
       if (!buyerOk && !farmerOk) return res.status(404).json({ error: "Match not found." });
 

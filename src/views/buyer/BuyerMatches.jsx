@@ -37,8 +37,8 @@ function defaultNeeded(m) {
   return n && n >= todayStr() ? n : todayStr();
 }
 
-/* Photo at the left of each match: the farmer's photo of the products when there is
-   one (green ring), otherwise the product's listing photo. */
+/* Photo at the left of each match: the private offer photo when one exists,
+   otherwise the product listing photo. The API authorizes the matched buyer only. */
 function MatchThumb({ m }) {
   const [photo, setPhoto] = useState("");
   const [failed, setFailed] = useState(false);
@@ -84,7 +84,7 @@ function MatchDetails({ m, onClose, onDone, onNavigate }) {
   const [failed, setFailed] = useState(false);
   const [farmerPhoto, setFarmerPhoto] = useState("");
 
-  // The photo of the products the farmer attached when confirming.
+  // The product photo attached to the offer or saved for a general-supply match.
   useEffect(() => {
     let alive = true;
     if (m.hasPhoto) {

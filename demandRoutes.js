@@ -7,6 +7,7 @@ import { readDemandInput, readOfferInput, isValidId, round2 } from "./farmValida
 import { matchDemandSafe, cancelDemandWithMatches, offerSupplyToDemand } from "./matchingEngine.js";
 import { businessProfileFor } from "./businessProfile.js";
 import { breakdownFor, COUNTED_MATCH } from "./demandBreakdown.js";
+import { isValidMatchPhoto } from "./matchPhotoModel.js";
 
 const MAX_ACTIVE_REQUESTS = 100;
 const NOT_FOUND = { error: "Demand not found." };
@@ -25,6 +26,7 @@ function view(d, b = { pending: 0, confirmed: 0 }) {
   return {
     id: String(d._id),
     product: d.product,
+    category: d.category || "",
     quantity: d.quantity,
     matchedQuantity: d.matchedQuantity,
     confirmedQuantity: b.confirmed,
@@ -215,6 +217,7 @@ export default function createDemandRouter() {
         return {
           id: String(d._id),
           product: d.product,
+          category: d.category || "",
           quantity: d.quantity,
           unit: d.unit,
           neededDate: d.neededDate,
@@ -431,13 +434,19 @@ export default function createDemandRouter() {
     try {
       if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
 
-      const { value, error } = readOfferInput(req.body);
+      const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+      const { image, ...offerBody } = body;
+      if (!isValidMatchPhoto(image)) {
+        return res.status(400).json({ error: "A product photo is required. Upload a JPG, PNG or WEBP photo." });
+      }
+
+      const { value, error } = readOfferInput(offerBody);
       if (error) return res.status(400).json({ error });
 
       const result = await offerSupplyToDemand({
         demandId: req.params.id,
         farmerId: req.user.id,
-        input: value,
+        input: { ...value, image },
       });
       if (result.error) return res.status(result.status).json({ error: result.error });
 

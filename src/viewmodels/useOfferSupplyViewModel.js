@@ -24,6 +24,9 @@ export default function useOfferSupplyViewModel(demand, onOffered) {
     if (!SUPPLY_TYPES.some((t) => t.id === form.supplyType)) {
       e.supplyType = "Please choose a supply type.";
     }
+    if (!form.image) {
+      e.image = "Upload a photo of the product before submitting the offer.";
+    }
 
     const quantityError = checkQuantity(form.quantity);
     if (quantityError) {
@@ -70,6 +73,7 @@ export default function useOfferSupplyViewModel(demand, onOffered) {
         quantity: Number(form.quantity),
         supplyType: form.supplyType,
         availabilityDate: form.availabilityDate,
+        image: form.image,
       });
       setSubmitted(true);
       setSuccess(SUCCESS_MESSAGE);

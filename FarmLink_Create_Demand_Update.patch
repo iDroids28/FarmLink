@@ -1,0 +1,444 @@
+diff --git a/demandRoutes.js b/demandRoutes.js
+index 0d10dc2..881b956 100644
+--- a/demandRoutes.js
++++ b/demandRoutes.js
+@@ -25,6 +25,7 @@ function view(d, b = { pending: 0, confirmed: 0 }) {
+   return {
+     id: String(d._id),
+     product: d.product,
++    category: d.category || "",
+     quantity: d.quantity,
+     matchedQuantity: d.matchedQuantity,
+     confirmedQuantity: b.confirmed,
+@@ -215,6 +216,7 @@ export default function createDemandRouter() {
+         return {
+           id: String(d._id),
+           product: d.product,
++          category: d.category || "",
+           quantity: d.quantity,
+           unit: d.unit,
+           neededDate: d.neededDate,
+diff --git a/farmModels.js b/farmModels.js
+index 355dd81..6714cb4 100644
+--- a/farmModels.js
++++ b/farmModels.js
+@@ -70,6 +70,7 @@ const demandSchema = new mongoose.Schema(
+   {
+     buyer: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+     product: { type: String, required: true, trim: true, maxlength: 60 },
++    category: { type: String, default: "", trim: true, maxlength: 40 },
+     quantity: { type: Number, required: true, min: 0 },
+     matchedQuantity: { type: Number, min: 0, default: 0 },
+     unit: { type: String, enum: UNITS, required: true },
+diff --git a/farmValidation.js b/farmValidation.js
+index 5d92d43..5a22b22 100644
+--- a/farmValidation.js
++++ b/farmValidation.js
+@@ -5,6 +5,14 @@ import { SAFE_MESSAGES } from "./safeErrors.js";
+ 
+ export const UNITS = ["kg", "ton", "sack", "crate", "piece", "bundle", "ml", "liter", "gal", "bottle", "tray", "dozen"];
+ export const SUPPLY_TYPES = ["onhand", "expected"];
++const DEMAND_PRODUCT_RE = /^\p{L}{2,60}$/u;
++const DEMAND_CATEGORIES = [
++  "Vegetables", "Fruits", "Rice", "Corn & Grains", "Root Crops", "Legumes & Beans",
++  "Herbs & Spices", "Mushrooms", "Coconut Products", "Coffee & Cacao", "Sugarcane",
++  "Dairy & Milk", "Eggs", "Livestock", "Poultry", "Meat", "Fish & Seafood",
++  "Honey & Bee Products", "Seeds & Seedlings", "Flowers & Ornamental Plants",
++  "Fiber Crops", "Farm By-products", "Other Farm Products",
++];
+ 
+ const TEXT_RE = /^[\p{L}\p{N}\s.,'()-]+$/u;
+ const ID_RE = /^[a-f\d]{24}$/i;
+@@ -100,20 +108,28 @@ export function readSupplyInput(body) {
+ }
+ 
+ export function readDemandInput(body) {
+-  const allowed = ["product", "quantity", "unit", "neededDate", "location"];
++  const allowed = ["product", "category", "quantity", "unit", "neededDate", "location"];
+   if (!hasOnlyKeys(body, allowed)) return { error: SAFE_MESSAGES.unprocessed };
+   if (!UNITS.includes(body.unit)) return { error: "Please choose a valid unit." };
++  if (!DEMAND_CATEGORIES.includes(body.category)) return { error: "Please choose a valid farm-product category." };
+ 
+-  const product = cleanText(body.product, "Product", 60);
++  const product = typeof body.product === "string" ? body.product.trim() : "";
++  if (!DEMAND_PRODUCT_RE.test(product)) {
++    return { error: "Product name must contain 2–60 letters only, with no spaces, numbers, or special characters." };
++  }
+   const quantity = cleanQuantity(body.quantity);
++  if (quantity.error) return { error: quantity.error };
++  if (quantity.value < 25) return { error: `Minimum demand quantity is 25 ${body.unit}.` };
++
+   const date = cleanDate(body.neededDate, "the needed date", -1, 730, "The needed date cannot be in the past.");
+   const location = cleanText(body.location, "Location", 100);
+-
+-  const error = firstError([product, quantity, date, location]);
++  const error = firstError([date, location]);
+   if (error) return { error };
++
+   return {
+     value: {
+-      product: product.value,
++      product,
++      category: body.category,
+       quantity: quantity.value,
+       unit: body.unit,
+       neededDate: date.value,
+diff --git a/src/App.jsx b/src/App.jsx
+index aa84a0f..f806e0e 100644
+--- a/src/App.jsx
++++ b/src/App.jsx
+@@ -246,7 +246,7 @@ export default function App() {
+   const showPlus =
+     user.role !== "admin" &&
+     (activePage === "demands" || (activePage === "supply" && user.role === "farmer"));
+-  const plusLabel = activePage === "supply" ? "Add Supply" : "Create New Requirement";
++  const plusLabel = activePage === "supply" ? "Add Supply" : "Create a Demand";
+   const headerActions = showPlus ? (
+     <button
+       type="button"
+diff --git a/src/models/demand/Demand.js b/src/models/demand/Demand.js
+index 8b546ab..e6b9640 100644
+--- a/src/models/demand/Demand.js
++++ b/src/models/demand/Demand.js
+@@ -1,7 +1,17 @@
+ import {
+-  checkProduct, checkQuantity, checkUnit, checkDate, checkLocation,
++  checkQuantity, checkUnit, checkDate, checkLocation,
+ } from "../common";
+ 
++export const DEMAND_CATEGORIES = [
++  "Vegetables", "Fruits", "Rice", "Corn & Grains", "Root Crops", "Legumes & Beans",
++  "Herbs & Spices", "Mushrooms", "Coconut Products", "Coffee & Cacao", "Sugarcane",
++  "Dairy & Milk", "Eggs", "Livestock", "Poultry", "Meat", "Fish & Seafood",
++  "Honey & Bee Products", "Seeds & Seedlings", "Flowers & Ornamental Plants",
++  "Fiber Crops", "Farm By-products", "Other Farm Products",
++];
++
++const DEMAND_PRODUCT_RE = /^\p{L}{2,60}$/u;
++
+ export const DEMAND_STATUS_LABEL = {
+   open: "Open",
+   potential_match: "Potential Match",
+@@ -15,6 +25,7 @@ export const DEMAND_STATUS_LABEL = {
+ 
+ export const EMPTY_DEMAND_FORM = {
+   product: "",
++  category: "",
+   quantity: "",
+   unit: "kg",
+   neededDate: "",
+@@ -25,9 +36,19 @@ export const canChangeDemand = (d) => d.status === "open" && d.matchedQuantity =
+ export const canCancelDemand = (d) => d.status === "open" || d.status === "potential_match";
+ 
+ export function validateDemandInput(f) {
++  const product = String(f?.product || "").trim();
++  if (!DEMAND_PRODUCT_RE.test(product)) {
++    return "Product name must contain 2–60 letters only, with no spaces, numbers, or special characters.";
++  }
++  if (!DEMAND_CATEGORIES.includes(f?.category)) {
++    return "Please choose a valid farm-product category.";
++  }
++  const quantityError = checkQuantity(f?.quantity);
++  if (quantityError) return quantityError;
++  if (Number(f.quantity) < 25) {
++    return `Minimum demand quantity is 25 ${f.unit || "units"}.`;
++  }
+   return (
+-    checkProduct(f.product) ||
+-    checkQuantity(f.quantity) ||
+     checkUnit(f.unit) ||
+     checkDate(f.neededDate, "the needed date", true) ||
+     checkLocation(f.location)
+@@ -37,6 +58,7 @@ export function validateDemandInput(f) {
+ export function toDemandPayload(f) {
+   return {
+     product: f.product.trim(),
++    category: f.category,
+     quantity: Number(f.quantity),
+     unit: f.unit,
+     neededDate: f.neededDate,
+@@ -47,6 +69,7 @@ export function toDemandPayload(f) {
+ export function demandToForm(d) {
+   return {
+     product: d.product,
++    category: d.category || "",
+     quantity: String(d.quantity),
+     unit: d.unit,
+     neededDate: String(d.neededDate).slice(0, 10),
+diff --git a/src/viewmodels/useDemandViewModel.js b/src/viewmodels/useDemandViewModel.js
+index 4859503..84d9ac1 100644
+--- a/src/viewmodels/useDemandViewModel.js
++++ b/src/viewmodels/useDemandViewModel.js
+@@ -60,7 +60,7 @@ export default function useDemandViewModel() {
+       setError(problem);
+       return false;
+     }
+-    return mutate(() => demandRepository.create(toDemandPayload(form)), "Product request submitted.");
++    return mutate(() => demandRepository.create(toDemandPayload(form)), "Demand submitted successfully.");
+   }
+ 
+   async function updateDemand(id, form) {
+@@ -70,7 +70,7 @@ export default function useDemandViewModel() {
+       setError(problem);
+       return false;
+     }
+-    return mutate(() => demandRepository.update(id, toDemandPayload(form)), "Product request updated.");
++    return mutate(() => demandRepository.update(id, toDemandPayload(form)), "Demand updated successfully.");
+   }
+ 
+   function cancelDemand(id) {
+diff --git a/src/views/buyer/MyDemands.jsx b/src/views/buyer/MyDemands.jsx
+index 7fcdef0..929e4f2 100644
+--- a/src/views/buyer/MyDemands.jsx
++++ b/src/views/buyer/MyDemands.jsx
+@@ -4,17 +4,16 @@ import GlassCard from "../../components/GlassCard.jsx";
+ import { DataTable, PageHeader, Field, LoadNote, inputCls, primaryBtn, primaryStyle } from "../../components/DemoBits.jsx";
+ import { StatusBadge, statusTone, formatDate, formatQty } from "../../components/FormBits.jsx";
+ import useDemandViewModel from "../../viewmodels/useDemandViewModel";
+-import { EMPTY_DEMAND_FORM, DEMAND_STATUS_LABEL, canCancelDemand } from "../../models/demand/Demand";
++import { EMPTY_DEMAND_FORM, DEMAND_CATEGORIES, DEMAND_STATUS_LABEL, canCancelDemand } from "../../models/demand/Demand";
+ import {
+-  todayISO, checkProduct, checkQuantity, checkUnit, checkDate, checkLocation,
++  UNITS, todayISO, checkQuantity, checkUnit, checkDate, checkLocation,
+ } from "../../models/common";
+ import LocationPicker from "../../components/LocationPicker.jsx";
+ 
+ const REQ_ICON = "/reqr.png";
+ 
+-// Requirements are in kg only.
+-const UNITS = ["kg"];
+-const BLANK_FORM = { ...EMPTY_DEMAND_FORM, unit: "kg" };
++const BLANK_FORM = { ...EMPTY_DEMAND_FORM, category: "", unit: "kg" };
++const DEMAND_PRODUCT_RE = /^\p{L}{2,60}$/u;
+ 
+ const FILTERS = [
+   { label: "All", statuses: null },
+@@ -28,8 +27,12 @@ const FILTERS = [
+ function validate(f) {
+   const e = {};
+   const set = (k, msg) => { if (msg) e[k] = msg; };
+-  set("product", checkProduct(f.product));
+-  set("quantity", checkQuantity(f.quantity));
++  set("product", DEMAND_PRODUCT_RE.test(String(f.product || "").trim())
++    ? null
++    : "Use 2–60 letters only. Spaces, numbers, and special characters are not allowed.");
++  set("category", DEMAND_CATEGORIES.includes(f.category) ? null : "Choose a product category.");
++  const quantityError = checkQuantity(f.quantity);
++  set("quantity", quantityError || (Number(f.quantity) < 25 ? `Minimum quantity is 25 ${f.unit || "units"}.` : null));
+   set("unit", checkUnit(f.unit));
+   set("neededDate", checkDate(f.neededDate, "the needed date", true));
+   set("location", checkLocation(f.location));
+@@ -64,7 +67,7 @@ export default function MyDemands({ onNavigate, intent }) {
+   const shown = !active || !active.statuses ? mine : mine.filter((d) => active.statuses.includes(d.status));
+ 
+   const stats = [
+-    { label: "Total Requirements", value: mine.length, icon: ShoppingCart },
++    { label: "Total Demands", value: mine.length, icon: ShoppingCart },
+     { label: "Open", value: countOf(["open"]), icon: Clock },
+     { label: "Potential Match", value: countOf(["potential_match", "pending_confirmation"]), icon: Link2 },
+     { label: "Partially Matched", value: countOf(["partially_matched"]), icon: ClipboardList },
+@@ -77,6 +80,12 @@ export default function MyDemands({ onNavigate, intent }) {
+     setFieldErrors((errs) => (errs[k] ? { ...errs, [k]: undefined } : errs));
+   };
+ 
++  const upLettersOnly = (k) => (e) => {
++    const value = e.target.value.replace(/[^\p{L}]/gu, "").slice(0, 60);
++    setForm((f) => ({ ...f, [k]: value }));
++    setFieldErrors((errs) => (errs[k] ? { ...errs, [k]: undefined } : errs));
++  };
++
+   const setLocation = (value) => {
+     setForm((f) => ({ ...f, location: value }));
+     setFieldErrors((errs) => (errs.location ? { ...errs, location: undefined } : errs));
+@@ -92,7 +101,7 @@ export default function MyDemands({ onNavigate, intent }) {
+   async function submit(e) {
+     e.preventDefault();
+     if (vm.submitting) return;
+-    const payload = { ...form, unit: "kg" };
++    const payload = { ...form };
+     const errs = validate(payload);
+     setFieldErrors(errs);
+     if (Object.keys(errs).length > 0) return;
+@@ -111,6 +120,7 @@ export default function MyDemands({ onNavigate, intent }) {
+       render: (r) => (
+         <div>
+           <p className="font-medium">{r.product}</p>
++          {r.category && <p className="text-[11px] text-[#55815A]">{r.category}</p>}
+           <p className="text-[11.5px] text-gray-500">
+             {r.location} | Need: {formatQty(r.quantity)} {r.unit} | Confirmed: {formatQty(r.confirmedQuantity ?? 0)} | Waiting for farmer: {formatQty(r.pendingQuantity ?? 0)} | Remaining: {formatQty(r.remainingQuantity)}
+           </p>
+@@ -144,7 +154,7 @@ export default function MyDemands({ onNavigate, intent }) {
+ 
+   return (
+     <div className="space-y-6">
+-      <PageHeader title="My Requirements" subtitle="Manage your product requirements and track their status. Use the + button at the top to create a new one." />
++      <PageHeader title="My Demands" subtitle="Tell farmers what your business needs, then track possible matches and confirmations." />
+       <LoadNote loading={vm.loading && mine.length === 0} error={showForm ? "" : vm.error} />
+       {vm.success && !showForm && <p className="rounded-xl bg-green-50 p-3 text-[13px] text-green-800">{vm.success}</p>}
+ 
+@@ -162,7 +172,7 @@ export default function MyDemands({ onNavigate, intent }) {
+ 
+       <GlassCard padding="p-0">
+         <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-5">
+-          <h3 className="text-[14.5px] font-semibold text-[#16301F]">My Requirements ({mine.length})</h3>
++          <h3 className="text-[14.5px] font-semibold text-[#16301F]">My Demands ({mine.length})</h3>
+           <div className="flex flex-wrap gap-1.5">
+             {FILTERS.map((f) => (
+               <button
+@@ -175,67 +185,110 @@ export default function MyDemands({ onNavigate, intent }) {
+           </div>
+         </div>
+         <div className="mt-3">
+-          <DataTable columns={columns} rows={shown} empty="No requirements yet. Click the + button at the top to create one." />
++          <DataTable columns={columns} rows={shown} empty="No demands yet. Use Create a Demand to tell farmers what you need." />
+         </div>
+       </GlassCard>
+ 
+       {showForm && (
+         <div
+-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
++          className="fixed inset-0 z-50 flex items-center justify-center bg-[#102615]/45 p-3 backdrop-blur-[2px] sm:p-5"
+           onMouseDown={(e) => e.target === e.currentTarget && closeForm()}
+-          role="dialog" aria-modal="true" aria-label="Create New Requirement"
++          role="dialog" aria-modal="true" aria-label="Create a Demand"
+         >
+-          <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-5 shadow-xl">
+-            <div className="flex items-start justify-between gap-3">
+-              <div className="flex items-start gap-3">
+-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#E8F5E9]">
+-                  {iconFailed ? (
+-                    <ClipboardList size={20} className="text-[#2E7D32]" />
+-                  ) : (
+-                    <img src={REQ_ICON} alt="" className="h-6 w-6 object-contain" onError={() => setIconFailed(true)} />
+-                  )}
+-                </span>
+-                <div>
+-                  <h3 className="text-[15.5px] font-semibold text-[#16301F]">Create New Requirement</h3>
+-                  <p className="mb-3 text-[12.5px] text-gray-500">Fill in the details of the product you need (per kg).</p>
++          <div className="max-h-[94vh] w-full max-w-xl overflow-y-auto rounded-3xl border border-[#DDEBDD] bg-white p-4 shadow-[0_24px_80px_rgba(14,54,26,0.24)] sm:p-7">
++            <div className="rounded-2xl border border-[#DCEBDD] bg-gradient-to-br from-[#EEF8EA] via-white to-[#F7FBF5] p-4 sm:p-5">
++              <div className="flex items-start justify-between gap-3">
++                <div className="flex min-w-0 items-start gap-3">
++                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#DFF0D9] text-[#287238] shadow-sm">
++                    {iconFailed ? (
++                      <ClipboardList size={23} />
++                    ) : (
++                      <img src={REQ_ICON} alt="" className="h-7 w-7 object-contain" onError={() => setIconFailed(true)} />
++                    )}
++                  </span>
++                  <div className="min-w-0">
++                    <span className="inline-flex rounded-full border border-[#CFE5CA] bg-white/80 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[#357342]">Business / Buyer</span>
++                    <h3 className="mt-2 text-xl font-bold tracking-tight text-[#16301F] sm:text-2xl">Create a Demand</h3>
++                    <p className="mt-1 max-w-md text-[12.5px] leading-5 text-gray-600">Tell nearby farmers which product you need, the quantity, and the date you need it.</p>
++                  </div>
+                 </div>
++                <button type="button" onClick={closeForm} aria-label="Close" className="rounded-xl border border-transparent p-2 text-gray-500 transition hover:border-gray-200 hover:bg-white hover:text-gray-800">
++                  <X size={19} />
++                </button>
+               </div>
+-              <button type="button" onClick={closeForm} aria-label="Close" className="rounded-md p-1 text-gray-500 hover:bg-gray-100">
+-                <X size={18} />
+-              </button>
+             </div>
+ 
+-            <form onSubmit={submit} className="space-y-3" noValidate>
+-              <Field label="Product Name" required>
+-                <input value={form.product} onChange={up("product")} maxLength={60} placeholder="Enter product name" className={inputCls + errCls("product")} />
+-                <FieldError message={fieldErrors.product} />
+-              </Field>
+-              <div className="grid grid-cols-2 gap-3">
+-                <Field label="Quantity" required>
+-                  <input type="number" min="0" step="any" value={form.quantity} onChange={up("quantity")} placeholder="Enter quantity" className={inputCls + errCls("quantity")} />
+-                  <FieldError message={fieldErrors.quantity} />
++            <form onSubmit={submit} className="mt-5 space-y-4" noValidate>
++              <div className="grid gap-4 sm:grid-cols-2">
++                <Field label="Product Name" required>
++                  <input
++                    value={form.product}
++                    onChange={upLettersOnly("product")}
++                    maxLength={60}
++                    autoComplete="off"
++                    placeholder="e.g. Milk"
++                    className={inputCls + errCls("product")}
++                    aria-describedby="demand-product-help"
++                  />
++                  <p id="demand-product-help" className="mt-1.5 text-[11px] leading-4 text-gray-500">Letters only. No spaces, numbers, or special characters.</p>
++                  <FieldError message={fieldErrors.product} />
+                 </Field>
+-                <Field label="Unit" required>
+-                  <select value="kg" onChange={() => {}} className={inputCls + errCls("unit")}>
+-                    {UNITS.map((u) => <option key={u}>{u}</option>)}
++                <Field label="Category" required>
++                  <select value={form.category} onChange={up("category")} className={inputCls + errCls("category")}>
++                    <option value="">Select product category</option>
++                    {DEMAND_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+                   </select>
+-                  <FieldError message={fieldErrors.unit} />
++                  <FieldError message={fieldErrors.category} />
+                 </Field>
+               </div>
+-              <Field label="Needed Date" required>
+-                <input type="date" min={todayISO()} value={form.neededDate} onChange={up("neededDate")} className={inputCls + errCls("neededDate")} />
+-                <FieldError message={fieldErrors.neededDate} />
+-              </Field>
+-              <Field label="Location / Delivery Address" required>
+-                <LocationPicker value={form.location} onChange={setLocation} invalid={Boolean(fieldErrors.location)} />
+-                <FieldError message={fieldErrors.location} />
+-              </Field>
+-              {vm.error && <p className="rounded-lg bg-red-50 p-2.5 text-[12.5px] text-red-700">{vm.error}</p>}
+-              <button type="submit" disabled={vm.submitting} className={primaryBtn + " w-full"} style={primaryStyle}>
+-                {vm.submitting ? "Submitting..." : "Submit Requirement"}
+-              </button>
+-              <p className="rounded-xl bg-blue-50 p-3 text-[12px] text-blue-800">
+-                Your requirement is compared with supply posted by farmers. A possible match needs the farmer's confirmation.
++
++              <div className="rounded-2xl border border-[#E0EBDD] bg-[#F8FCF6] p-4">
++                <div className="mb-3 flex items-center justify-between gap-3">
++                  <div>
++                    <h4 className="text-[13px] font-bold text-[#203D25]">Quantity needed</h4>
++                    <p className="mt-0.5 text-[11.5px] text-gray-500">Minimum: 25 in the selected unit</p>
++                  </div>
++                  <span className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-[#397345] ring-1 ring-[#D8E9D2]">Required</span>
++                </div>
++                <div className="grid grid-cols-[1fr_0.85fr] gap-3">
++                  <Field label="Quantity" htmlFor="demand-quantity" required>
++                    <input id="demand-quantity" type="number" min="25" max="1000000" step="any" inputMode="decimal" value={form.quantity} onChange={up("quantity")} placeholder="Minimum 25" className={inputCls + errCls("quantity")} />
++                    <FieldError message={fieldErrors.quantity} />
++                  </Field>
++                  <Field label="Unit" htmlFor="demand-unit" required>
++                    <select id="demand-unit" value={form.unit} onChange={up("unit")} className={inputCls + errCls("unit")}>
++                      {UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
++                    </select>
++                    <FieldError message={fieldErrors.unit} />
++                  </Field>
++                </div>
++              </div>
++
++              <div className="grid gap-4 sm:grid-cols-2">
++                <Field label="Needed Date" htmlFor="demand-date" required>
++                  <input id="demand-date" type="date" min={todayISO()} value={form.neededDate} onChange={up("neededDate")} className={inputCls + errCls("neededDate")} />
++                  <FieldError message={fieldErrors.neededDate} />
++                </Field>
++                <Field label="Location / Delivery Address" htmlFor="demand-location" required>
++                  <LocationPicker value={form.location} onChange={setLocation} invalid={Boolean(fieldErrors.location)} />
++                  <FieldError message={fieldErrors.location} />
++                </Field>
++              </div>
++
++              {vm.error && <p role="alert" className="rounded-xl border border-red-100 bg-red-50 p-3 text-[12.5px] text-red-700">{vm.error}</p>}
++
++              <div className="flex flex-col-reverse gap-2.5 pt-1 sm:flex-row">
++                <button type="button" onClick={closeForm} disabled={vm.submitting} className="min-h-11 rounded-xl border border-[#DDE7DC] bg-white px-5 py-3 text-[13px] font-semibold text-gray-600 transition hover:bg-gray-50 disabled:opacity-60 sm:w-1/3">
++                  Cancel
++                </button>
++                <button type="submit" disabled={vm.submitting} className={primaryBtn + " min-h-11 flex-1 justify-center rounded-xl px-5 py-3 text-[13px] font-bold shadow-[0_8px_18px_rgba(46,125,50,0.2)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60"} style={primaryStyle}>
++                  {vm.submitting ? "Submitting Demand..." : "Submit Demand"}
++                </button>
++              </div>
++
++              <p className="flex items-start gap-2 rounded-xl border border-[#DDEEDD] bg-[#F4FAF1] p-3 text-[11.5px] leading-5 text-[#43694A]">
++                <Link2 size={15} className="mt-0.5 shrink-0" />
++                FarmLink compares your demand with farmers’ supply. A possible match still needs the farmer’s confirmation.
+               </p>
+             </form>
+           </div>

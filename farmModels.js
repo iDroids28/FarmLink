@@ -70,6 +70,7 @@ const demandSchema = new mongoose.Schema(
   {
     buyer: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     product: { type: String, required: true, trim: true, maxlength: 60 },
+    category: { type: String, default: "", trim: true, maxlength: 40 },
     quantity: { type: Number, required: true, min: 0 },
     matchedQuantity: { type: Number, min: 0, default: 0 },
     unit: { type: String, enum: UNITS, required: true },

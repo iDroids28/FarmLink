@@ -60,7 +60,7 @@ export default function useDemandViewModel() {
       setError(problem);
       return false;
     }
-    return mutate(() => demandRepository.create(toDemandPayload(form)), "Product request submitted.");
+    return mutate(() => demandRepository.create(toDemandPayload(form)), "Demand submitted successfully.");
   }
 
   async function updateDemand(id, form) {
@@ -70,7 +70,7 @@ export default function useDemandViewModel() {
       setError(problem);
       return false;
     }
-    return mutate(() => demandRepository.update(id, toDemandPayload(form)), "Product request updated.");
+    return mutate(() => demandRepository.update(id, toDemandPayload(form)), "Demand updated successfully.");
   }
 
   function cancelDemand(id) {
