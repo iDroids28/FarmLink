@@ -12,7 +12,7 @@ export const matchRepository = {
   async getSummary(id) {
     return (await apiClient.get(`/matches/${encodeURIComponent(id)}/summary`)).summary;
   },
-  // Farmer accepts (confirm) or declines a pending match.
+  // Decision owner accepts or declines: buyer for demand-specific offers, farmer for FIFO matches.
   async confirm(id) {
     return (await apiClient.post(`/matches/${encodeURIComponent(id)}/confirm`)).match;
   },

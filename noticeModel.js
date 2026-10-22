@@ -10,7 +10,7 @@ export const NOTICE_TYPES = [
   // A buyer rated a product after the order was complete
   "product_rated",
   // Broadcast a buyer demand to farmers who do not already receive a match alert.
-  "buyer_demand_created",
+  "buyer_demand_created", "demand_removed_by_admin",
 ];
 
 const noticeSchema = new mongoose.Schema(

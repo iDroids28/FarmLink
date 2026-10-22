@@ -13,7 +13,7 @@ const NOT_PENDING = { error: "This match request can no longer be changed." };
 
 // Farmer sees the request and approved business name, but not buyer user ID,
 // personal name, or email in the generic Matches response.
-function farmerView(m, businessName) {
+function farmerView(m, businessName, isDemandOffer = false) {
   const view = {
     id: String(m._id),
     product: m.product,
@@ -22,15 +22,17 @@ function farmerView(m, businessName) {
     neededDate: m.neededDate,
     location: m.location,
     status: m.status,
+    isDemandOffer,
     createdAt: m.createdAt,
   };
   if (businessName !== undefined) view.businessName = businessName || null;
   return view;
 }
-function buyerView(m) {
+function buyerView(m, isDemandOffer = false) {
   return {
     id: String(m._id), product: m.product, quantity: m.quantity, unit: m.unit,
-    availabilityDate: m.availabilityDate, location: m.location, status: m.status, createdAt: m.createdAt,
+    availabilityDate: m.availabilityDate, location: m.location, status: m.status,
+    isDemandOffer, createdAt: m.createdAt,
   };
 }
 
@@ -45,15 +47,20 @@ export default function createMatchRouter() {
         .sort({ createdAt: -1 })
         .limit(200)
         .lean();
+      const supplyIds = [...new Set(rows.map((row) => String(row.supply)))];
+      const targetedSupplies = supplyIds.length
+        ? await Supply.find({ _id: { $in: supplyIds } }).select("_id targetDemand").lean()
+        : [];
+      const demandOfferIds = new Set(targetedSupplies.filter((s) => s.targetDemand).map((s) => String(s._id)));
       if (isFarmer) {
         const names = await businessNamesFor(rows.map((row) => row.buyer));
         return res.json({
           matches: rows.map((row) =>
-            farmerView(row, names.get(String(row.buyer)) ?? null)
+            farmerView(row, names.get(String(row.buyer)) ?? null, demandOfferIds.has(String(row.supply)))
           ),
         });
       }
-      res.json({ matches: rows.map(buyerView) });
+      res.json({ matches: rows.map((row) => buyerView(row, demandOfferIds.has(String(row.supply)))) });
     } catch (err) {
       respondWithSafeError(res, err, "Load matches error");
     }
@@ -76,7 +83,7 @@ export default function createMatchRouter() {
       const [demand, breakdowns, supply] = await Promise.all([
         Demand.findById(m.demand).select("quantity").lean(),
         breakdownFor([m.demand]),
-        Supply.findById(m.supply).select("supplyType").lean(),
+        Supply.findById(m.supply).select("supplyType targetDemand").lean(),
       ]);
       const b = breakdowns.get(String(m.demand)) || { pending: 0, confirmed: 0 };
       const total = demand ? demand.quantity : m.quantity;
@@ -93,6 +100,7 @@ export default function createMatchRouter() {
           neededDate: m.neededDate,
           availabilityDate: m.availabilityDate,
           supplyType: supply?.supplyType || "onhand",
+          isDemandOffer: Boolean(supply?.targetDemand),
           requestedQuantity: total,
           confirmedQuantity: b.confirmed,
           pendingQuantity: b.pending,
@@ -189,10 +197,15 @@ export default function createMatchRouter() {
     try {
       if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);
       const m = await action(req.params.id, req.user.id);
-      if (m) return res.json({ match: farmerView(m) });
+      if (m) {
+        const supply = await Supply.findById(m.supply).select("targetDemand").lean();
+        const isOffer = Boolean(supply?.targetDemand);
+        return res.json({ match: req.user.role === "buyer" ? buyerView(m, isOffer) : farmerView(m, undefined, isOffer) });
+      }
 
-      // Same "not found" for someone else's match; 409 only for the owner.
-      const own = await Match.exists({ _id: req.params.id, farmer: req.user.id });
+      // Same "not found" for another user's match; 409 only for the owner.
+      const side = req.user.role === "buyer" ? "buyer" : "farmer";
+      const own = await Match.exists({ _id: req.params.id, [side]: req.user.id });
       if (!own) return res.status(404).json(NOT_FOUND);
       res.status(409).json(NOT_PENDING);
     } catch (err) {
@@ -200,12 +213,14 @@ export default function createMatchRouter() {
     }
   }
 
-  router.post("/:id/confirm", writeLimiter, requireRole("farmer"), (req, res) =>
+  // The engine checks which side owns the decision: buyer for demand-specific
+  // offers, farmer for ordinary FIFO matches.
+  router.post("/:id/confirm", writeLimiter, requireRole("farmer", "buyer"), (req, res) =>
     decide(req, res, confirmMatch, "Confirm match error"));
-  router.post("/:id/decline", writeLimiter, requireRole("farmer"), (req, res) =>
+  router.post("/:id/decline", writeLimiter, requireRole("farmer", "buyer"), (req, res) =>
     decide(req, res, declineMatch, "Decline match error"));
 
-  // Buyer: cancel one match that is still waiting for the farmer.
+  // Buyer: cancel a general match while it is still waiting for the farmer.
   router.post("/:id/cancel", writeLimiter, requireRole("buyer"), async (req, res) => {
     try {
       if (!isValidId(req.params.id)) return res.status(404).json(NOT_FOUND);

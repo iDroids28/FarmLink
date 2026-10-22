@@ -166,7 +166,7 @@ export default function createRequestRouter() {
       const { Model, supplyKey, demandKey } = found;
 
       const supplies = await Supply.find({ farmer: req.user.id })
-        .select("image pricePerUnit product unit supplyType availabilityDate location category")
+        .select("image pricePerUnit product unit supplyType availabilityDate location category targetDemand")
         .lean();
       if (!supplies.length) return res.json({ matches: [] });
       const bySupply = new Map(supplies.map((s) => [String(s._id), s]));
@@ -177,7 +177,7 @@ export default function createRequestRouter() {
         .lean();
 
       const demands = rows.length
-        ? await Demand.find({ _id: { $in: rows.map((m) => m[demandKey]) } }).select("buyer quantity neededDate product unit location").lean()
+        ? await Demand.find({ _id: { $in: rows.map((m) => m[demandKey]) } }).select("buyer quantity neededDate product unit location status").lean()
         : [];
       const byDemand = new Map(demands.map((d) => [String(d._id), d]));
 
@@ -213,6 +213,8 @@ export default function createRequestRouter() {
             requestedQuantity: d?.quantity || 0,
             neededDate: d?.neededDate || null,
             hasPhoto: photos.has(String(m._id)),
+            demandStatus: d?.status || null,
+            isDemandOffer: Boolean(s?.targetDemand),
             order: orders.get(String(m._id)) || null,
             createdAt: m.createdAt,
           };
@@ -231,7 +233,7 @@ export default function createRequestRouter() {
       if (!found) return res.status(501).json({ error: "Matches could not be read on the server." });
       const { Model, supplyKey, demandKey } = found;
 
-      const demands = await Demand.find({ buyer: req.user.id }).select("_id quantity neededDate product unit").lean();
+      const demands = await Demand.find({ buyer: req.user.id }).select("_id quantity neededDate product unit status").lean();
       if (!demands.length) return res.json({ matches: [] });
       const byDemand = new Map(demands.map((d) => [String(d._id), d]));
 
@@ -243,7 +245,7 @@ export default function createRequestRouter() {
       const supplyIds = [...new Set(rows.map((m) => String(m[supplyKey])))];
       const supplies = supplyIds.length
         ? await Supply.find({ _id: { $in: supplyIds } })
-            .select("image pricePerUnit farmer product unit supplyType availabilityDate location category")
+            .select("image pricePerUnit farmer product unit supplyType availabilityDate location category targetDemand")
             .lean()
         : [];
       const bySupply = new Map(supplies.map((s) => [String(s._id), s]));
@@ -279,6 +281,8 @@ export default function createRequestRouter() {
             requestedQuantity: d?.quantity || 0,
             neededDate: d?.neededDate || null,
             hasPhoto: photos.has(String(m._id)),
+            demandStatus: d?.status || null,
+            isDemandOffer: Boolean(s?.targetDemand),
             order: orders.get(String(m._id)) || null,
             createdAt: m.createdAt,
           };
@@ -394,7 +398,14 @@ export default function createRequestRouter() {
       if (!m) return res.status(404).json({ error: "Match not found." });
       const demand = await Demand.findById(m[demandKey]).select("buyer neededDate").lean();
       if (!demand || String(demand.buyer) !== String(req.user.id)) return res.status(404).json({ error: "Match not found." });
-      if (m.status !== "confirmed") return res.status(409).json({ error: "The farmer has not confirmed this match yet." });
+      const offerSupply = await Supply.findById(m[supplyKey]).select("targetDemand").lean();
+      if (m.status !== "confirmed") {
+        return res.status(409).json({
+          error: offerSupply?.targetDemand
+            ? "Accept the farmer's offer before placing a pre-order."
+            : "The farmer has not confirmed this match yet.",
+        });
+      }
       if (await MatchOrder.exists({ match: m._id })) {
         return res.status(409).json({ error: "You already pre-ordered this match. Track it in My Pre Orders." });
       }
@@ -415,8 +426,8 @@ export default function createRequestRouter() {
       const qty = round2(matchQty(m));
       if (!(qty > 0)) return res.status(400).json({ error: "This match has no quantity." });
 
-      // The farmer already confirmed this match, so the order starts at "accepted".
-      // The quantity was reserved when the farmer confirmed, so it is not taken off again.
+      // The match has already been accepted (by the buyer for targeted offers,
+      // or by the farmer for general FIFO matches). Quantity was reserved earlier.
       const doc = await PreOrderRequest.create({
         supply: supply._id,
         owner: supply.farmer,

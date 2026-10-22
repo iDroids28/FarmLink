@@ -77,6 +77,11 @@ const demandSchema = new mongoose.Schema(
     neededDate: { type: Date, required: true },
     location: { type: String, required: true, trim: true, maxlength: 100 },
     status: { type: String, enum: DEMAND_STATUSES, default: "open" },
+    // Admin removals are soft-deleted so the buyer can see why the demand was removed,
+    // and the admin retains an audit trail without destroying matching history.
+    adminRemovalReason: { type: String, default: "", trim: true, maxlength: 500 },
+    adminRemovedAt: { type: Date, default: null },
+    adminRemovedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true }
 );

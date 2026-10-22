@@ -6,7 +6,7 @@ import { SUPPLY_TYPES } from "../models/supply/Supply";
 import { demandProgress } from "../models/demand/progress";
 
 const SUCCESS_MESSAGE =
-  "Offer submitted. Please review it and confirm or decline it from your Matches page.";
+  "Offer submitted. The buyer has been notified and will accept or decline it from My Requests. Track the offer status in Business Requests.";
 
 /* State + validation for the Offer Supply form. The server re-checks everything. */
 export default function useOfferSupplyViewModel(demand, onOffered) {

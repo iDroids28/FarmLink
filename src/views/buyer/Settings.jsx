@@ -14,8 +14,8 @@ const CONFIG = {
     { key: "system", icon: Megaphone, label: "System Announcements", desc: "Receive important news and system updates." },
   ],
   faq: [
-    { q: "How do I post a requirement?", a: "Open My Requirements and click the + button (or Request Product on the dashboard), then fill in the product, quantity, location and date needed." },
-    { q: "How does matching work?", a: "When a farmer's supply fits your requirement, FarmLink suggests a match. The farmer confirms it, and you can follow the progress on the Matches page." },
+    { q: "How do I post a demand?", a: "Open My Demand and click the create button (or use the dashboard shortcut), then fill in the product, quantity, location and date needed." },
+    { q: "How does matching work?", a: "For an offer submitted to one of your demands, review and accept or decline it from My Requests. After accepting, continue to Matches to choose Pick Up or Delivery. Automatic FIFO matches still wait for the farmer's confirmation." },
     { q: "How do I change my password?", a: "Go to Account & Security above and click Change Password. Your other devices will be logged out for safety." },
     { q: "I forgot my password.", a: "Log out, choose Forgot Password on the login page and follow the steps to get a code and set a new password." },
   ],

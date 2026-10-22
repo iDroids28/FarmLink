@@ -14,7 +14,7 @@ import {
 
 /*
  * Business profile + request details. Progress is derived from the demand
- * already loaded by Business Requests. Confirm/Decline stay on Matches.
+ * already loaded by Business Requests. Direct offer decisions belong to the buyer.
  */
 export default function BusinessDetailsModal({ demand, onClose, onOffered }) {
   const demandId = demand.id;
@@ -176,7 +176,7 @@ export default function BusinessDetailsModal({ demand, onClose, onOffered }) {
           <OfferSupplyForm demand={demand} onOffered={onOffered} />
 
           <p className="rounded-lg bg-[#F4F7F3] p-2.5 text-[12px] text-gray-600">
-            After submitting an offer, review it and confirm or decline it from your Matches page.
+            After submitting, the buyer will review the offer in My Requests and accept or decline it. Track the offer status here in Business Requests.
           </p>
         </div>
       </div>

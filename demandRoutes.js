@@ -41,6 +41,8 @@ function view(d, b = { pending: 0, confirmed: 0 }) {
     neededDate: d.neededDate,
     location: d.location,
     status: d.status,
+    adminRemovalReason: d.adminRemovalReason || "",
+    adminRemovedAt: d.adminRemovedAt || null,
     createdAt: d.createdAt,
     updatedAt: d.updatedAt,
   };

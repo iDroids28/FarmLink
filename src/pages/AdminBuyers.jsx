@@ -1,7 +1,8 @@
 import { useState } from "react";
 import GlassCard from "../components/GlassCard.jsx";
 import RoleApplicationsPanel from "../components/RoleApplicationsPanel.jsx";
-import { PageHeader, DataTable, DetailCard, LoadNote } from "../components/DemoBits.jsx";
+import { PageHeader, DataTable, LoadNote } from "../components/DemoBits.jsx";
+import AdminBuyerProfileModal from "../components/AdminBuyerProfileModal.jsx";
 import { useLoad } from "../api/farmlinkApi.js";
 
 export default function AdminBuyers() {
@@ -14,7 +15,7 @@ export default function AdminBuyers() {
     {
       key: "action", label: "Action",
       render: (b) => (
-        <button type="button" onClick={() => setSelected(b)} className="rounded-md bg-gray-100 px-3 py-1 text-[12px] font-semibold text-gray-700 hover:bg-gray-200">
+        <button type="button" onClick={() => setSelected(b.id)} className="rounded-md bg-gray-100 px-3 py-1 text-[12px] font-semibold text-gray-700 hover:bg-gray-200">
           View Profile
         </button>
       ),
@@ -34,10 +35,9 @@ export default function AdminBuyers() {
         </div>
       </GlassCard>
       {selected && (
-        <DetailCard
-          title={`Buyer Profile: ${selected.name}`}
+        <AdminBuyerProfileModal
+          buyerId={selected}
           onClose={() => setSelected(null)}
-          rows={[["Name", selected.name], ["Email", selected.email], ["Role", "Buyer"], ["Total requirements", String(selected.reqCount)]]}
         />
       )}
     </div>

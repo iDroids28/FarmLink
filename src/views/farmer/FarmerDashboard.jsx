@@ -9,6 +9,8 @@ import { requestRepository } from "../../repositories/requestRepository";
 import { SUPPLY_TYPE_LABEL, SUPPLY_STATUS_LABEL } from "../../models/supply/Supply";
 import { Sprout, Plus, Link2, Inbox, Package, CalendarDays, TrendingUp, ArrowUpRight } from "lucide-react";
 import DashboardProfilePhoto from "../../components/DashboardProfilePhoto.jsx";
+import FarmerSupplyPreviewModal from "../../components/FarmerSupplyPreviewModal.jsx";
+import ReviewsModal from "../../components/ReviewsModal.jsx";
 
 export default function FarmerDashboard({ user, onNavigate }) {
   const vm = useSupplyViewModel();
@@ -17,6 +19,8 @@ export default function FarmerDashboard({ user, onNavigate }) {
   const { loadSupplies } = vm;
 
   const [incoming, setIncoming] = useState([]);
+  const [selectedSupply, setSelectedSupply] = useState(null);
+  const [reviewsFor, setReviewsFor] = useState(null);
 
   useEffect(() => {
     loadMatches();
@@ -196,7 +200,7 @@ export default function FarmerDashboard({ user, onNavigate }) {
         <GlassCard padding="p-0" className="overflow-hidden border border-[#E0EAE0]">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E9F0E7] bg-gradient-to-r from-[#F5FBF3] to-white px-5 py-4 sm:px-6">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#E4F4E2] text-[#2E7D32]"><Sprout size={20} /></div>
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#E4F4E2] text-[#2E7D32]"><Package size={20} /></div>
               <div>
                 <h3 className="text-[16px] font-bold text-[#16301F] sm:text-[17px]">Recent Supply</h3>
                 <p className="text-[12px] text-gray-500 sm:text-[13px]">Your latest posted items.</p>
@@ -207,23 +211,55 @@ export default function FarmerDashboard({ user, onNavigate }) {
             </button>
           </div>
           <div className="divide-y divide-[#EDF2EB] px-4 sm:px-6">
-            {recent.map((s) => (
-              <div key={s.id} className="flex items-center justify-between gap-3 rounded-xl px-2 py-4 transition hover:bg-[#FAFCF9] sm:px-3">
-                <div className="flex min-w-0 items-center gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#F0F7ED] text-[#3D8740]"><Package size={19} /></div>
-                  <div className="min-w-0">
-                    <p className="truncate text-[15px] font-semibold text-[#16301F]">{s.product}</p>
-                    <p className="mt-0.5 truncate text-[12.5px] text-gray-500 sm:text-[13px]">
-                      {formatQty(s.availableQuantity)} {s.unit} <span className="mx-1 text-gray-300">·</span> {SUPPLY_TYPE_LABEL[s.supplyType]}
-                    </p>
-                  </div>
-                </div>
-                <StatusBadge label={SUPPLY_STATUS_LABEL[s.status] || s.status} tone={statusTone(s.status)} />
-              </div>
-            ))}
+            {recent.map((s) => {
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setSelectedSupply(s)}
+                  aria-label={`View details for ${s.product || "supply"}`}
+                  className="group flex w-full items-center justify-between gap-3 rounded-xl px-2 py-4 text-left transition hover:bg-[#F5FBF3] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#4CAF50] sm:px-3"
+                >
+                  <span className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-[#DCEBD9] bg-[#F0F7ED] transition group-hover:border-[#B8D9B2]">
+                      {s.image ? (
+                        <img
+                          src={s.image}
+                          alt={`${s.product || "Product"} photo`}
+                          loading="lazy"
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <span className="px-1 text-center text-[9px] font-medium leading-tight text-[#718071]">No photo</span>
+                      )}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-[15px] font-semibold text-[#16301F]">{s.product}</span>
+                      <span className="mt-0.5 block truncate text-[12.5px] text-gray-500 sm:text-[13px]">
+                        {formatQty(s.availableQuantity)} {s.unit} <span className="mx-1 text-gray-300">·</span> {SUPPLY_TYPE_LABEL[s.supplyType]}
+                      </span>
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    <StatusBadge label={SUPPLY_STATUS_LABEL[s.status] || s.status} tone={statusTone(s.status)} />
+                    <ArrowUpRight size={15} className="text-gray-400 transition group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-[#2E7D32]" />
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </GlassCard>
       )}
+
+      {selectedSupply && (
+        <FarmerSupplyPreviewModal
+          supply={selectedSupply}
+          farmer={user?.name || "Farmer"}
+          onClose={() => setSelectedSupply(null)}
+          onReviews={() => setReviewsFor(selectedSupply)}
+        />
+      )}
+      {reviewsFor && <ReviewsModal supply={reviewsFor} onClose={() => setReviewsFor(null)} />}
     </div>
   );
 }

@@ -15,7 +15,7 @@ const CONFIG = {
   ],
   faq: [
     { q: "How do I post my supply?", a: "Open My Supply and click the + button (or Post Supply on the dashboard), then enter the product, quantity and whether it is on-hand or expected." },
-    { q: "How do I answer a match request?", a: "Open Matches. Requests waiting for you are marked as pending; confirm or decline each one there." },
+    { q: "How do I answer a match request?", a: "For a direct Business Request, submit an offer and wait for the buyer to accept or decline it. For automatic FIFO matches, open Matches and confirm or decline the match yourself." },
     { q: "How do I change my password?", a: "Go to Account & Security above and click Change Password. Your other devices will be logged out for safety." },
     { q: "I forgot my password.", a: "Log out, choose Forgot Password on the login page and follow the steps to get a code and set a new password." },
   ],

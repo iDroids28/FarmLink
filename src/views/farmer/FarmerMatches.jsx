@@ -6,6 +6,7 @@ import { Notice, StatusBadge, formatDate, formatQty } from "../../components/For
 import { peso } from "../../components/SupplyCard.jsx";
 import { matchRepository } from "../../repositories/matchRepository";
 import { MATCH_STATUS_LABEL, MATCH_STATUS_TONE } from "../../models/match/Match";
+import { DEMAND_STATUS_LABEL } from "../../models/demand/Demand";
 import { getUserMessage } from "../../api/farmlinkApi.js";
 import { matchOrderApi } from "../../api/matchOrderApi.js";
 
@@ -28,6 +29,12 @@ const STEP_LABEL = {
 const grayBtn = "rounded-md bg-gray-100 px-3 py-2 text-[13px] font-semibold text-gray-700 hover:bg-gray-200";
 const isExpected = (m) => m.supplyType === "expected";
 const typeLabel = (m) => (isExpected(m) ? "Expected Harvest" : "On Hand");
+const demandStatusTone = (status) => {
+  if (["matched", "completed"].includes(status)) return "green";
+  if (["potential_match", "pending_confirmation", "partially_matched"].includes(status)) return "amber";
+  return "gray";
+};
+const demandStatusText = (m) => m.demandStatus ? (DEMAND_STATUS_LABEL[m.demandStatus] || m.demandStatus) : "";
 
 // Shrinks the chosen photo in the browser (about 60 KB) so it can be sent safely.
 function shrinkPhoto(file) {
@@ -60,64 +67,46 @@ function shrinkPhoto(file) {
   });
 }
 
-function Thumb({ src, alt }) {
-  const [failed, setFailed] = useState(false);
-  return (
-    <span className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[#E8F5E9] text-[#2E7D32]">
-      {src && !failed ? <img src={src} alt={alt} onError={() => setFailed(true)} className="h-full w-full object-cover" /> : <Sprout size={20} />}
-    </span>
-  );
-}
-
-/* The image attached to a request-specific offer is private. Load it through
-   the authorized match-photo endpoint instead of relying on a public image URL. */
-function MatchOfferPhoto({ m }) {
+/* Show the offer photo before the product name, matching the Buyer Matches layout.
+   The private endpoint also allows the farmer who owns this exact supply to view their own upload. */
+function MatchThumb({ m }) {
   const [photo, setPhoto] = useState("");
-  const [loading, setLoading] = useState(Boolean(m.hasPhoto));
-  const [failed, setFailed] = useState(false);
+  const [photoFailed, setPhotoFailed] = useState(false);
+  const [listingFailed, setListingFailed] = useState(false);
 
   useEffect(() => {
     let active = true;
     setPhoto("");
-    setFailed(false);
-    setLoading(Boolean(m.hasPhoto));
-
-    if (!m.hasPhoto) {
-      return () => { active = false; };
+    setPhotoFailed(false);
+    setListingFailed(false);
+    if (m.hasPhoto) {
+      matchOrderApi.photo(m.id)
+        .then((data) => { if (active && data?.image) setPhoto(data.image); })
+        .catch(() => {});
     }
-
-    matchOrderApi.photo(m.id)
-      .then((data) => {
-        if (!active) return;
-        if (data?.image) setPhoto(data.image);
-        else setFailed(true);
-      })
-      .catch(() => { if (active) setFailed(true); })
-      .finally(() => { if (active) setLoading(false); });
-
     return () => { active = false; };
   }, [m.id, m.hasPhoto]);
 
-  if (!m.hasPhoto) return null;
+  const useOfferPhoto = Boolean(m.hasPhoto && photo && !photoFailed);
+  const src = useOfferPhoto ? photo : m.image;
+  const visibleSrc = useOfferPhoto ? photo : (listingFailed ? "" : m.image);
 
   return (
-    <div className="mb-4">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <p className="flex items-center gap-1.5 text-[13px] font-semibold text-[#16301F]">
-          <Camera size={15} className="text-[#2E7D32]" /> Product photo you uploaded
-        </p>
-        <span className="rounded-full bg-green-100 px-2.5 py-1 text-[11px] font-semibold text-green-800">Attached to this offer</span>
-      </div>
-      <div className="flex h-48 w-full items-center justify-center overflow-hidden rounded-xl border border-black/5 bg-gray-50 sm:h-56">
-        {photo && !failed ? (
-          <img src={photo} alt={`${m.product} product photo`} onError={() => setFailed(true)} className="h-full w-full object-contain" />
-        ) : loading ? (
-          <span className="text-[12.5px] text-gray-500">Loading your uploaded photo…</span>
-        ) : failed ? (
-          <span className="px-4 text-center text-[12.5px] text-gray-500">Could not load this photo. Refresh the page and try again.</span>
-        ) : null}
-      </div>
-    </div>
+    <span className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-black/5 bg-[#E8F5E9] text-[#2E7D32]">
+      {visibleSrc ? (
+        <img
+          src={visibleSrc}
+          alt={`${m.product} product photo`}
+          onError={() => {
+            if (useOfferPhoto) setPhotoFailed(true);
+            else setListingFailed(true);
+          }}
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        <Sprout size={22} />
+      )}
+    </span>
   );
 }
 
@@ -270,6 +259,10 @@ export default function FarmerMatches(props) {
     };
   }, [load]);
 
+  // Pending request-specific offers are proposals for the buyer to review in
+  // My Requests. Only automatic FIFO matches and buyer-accepted offers belong here.
+  const visibleRows = (rows || []).filter((m) => !m.isDemandOffer || m.status === "confirmed" || Boolean(m.order));
+
   async function decline(m) {
     if (busyId || !window.confirm(`Decline the match for ${m.product}?`)) return;
     setBusyId(m.id);
@@ -324,24 +317,24 @@ export default function FarmerMatches(props) {
     <div className="space-y-6">
       <PageHeader
         title="Matches"
-        subtitle="Review matched requests, check the product photo attached to each offer, then accept or decline the match."
+        subtitle="Review automatic matches that need your decision and track confirmed orders. Offers you submitted for a buyer demand wait for the buyer in My Requests."
       />
       <LoadNote loading={rows === null && !error} error="" />
       <Notice type="error">{actionError}</Notice>
       <Notice type="success">{note}</Notice>
 
-      {rows !== null && rows.length === 0 ? (
-        <EmptyState icon={Handshake} title="No matches yet" message="When a buyer's requirement matches your supply, it shows here." />
+      {rows !== null && visibleRows.length === 0 ? (
+        <EmptyState icon={Handshake} title="No matches to review" message="Pending offers for buyer demands are waiting for the buyer in My Requests. Automatic matches and buyer-accepted offers appear here." />
       ) : (
         <div className="space-y-3">
-          {(rows || []).map((m) => {
+          {visibleRows.map((m) => {
             const pending = m.status === "pending_confirmation";
+            const awaitingBuyer = pending && Boolean(m.isDemandOffer);
             const confirmed = m.status === "confirmed";
             return (
               <div key={m.id} className="rounded-2xl border border-black/5 bg-white p-4 shadow-sm">
-                {pending && m.hasPhoto && <MatchOfferPhoto m={m} />}
                 <div className="flex flex-wrap items-center gap-4">
-                  {!(pending && m.hasPhoto) && <Thumb src={m.image} alt={m.product} />}
+                  <MatchThumb m={m} />
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-[15.5px] font-bold text-[#16301F]">{m.product}</p>
                     <p className="text-[12.5px] text-gray-500">
@@ -353,11 +346,20 @@ export default function FarmerMatches(props) {
                   </div>
 
                   <div className="flex flex-wrap items-center justify-end gap-2">
-                    <StatusBadge label={MATCH_STATUS_LABEL[m.status] || m.status} tone={MATCH_STATUS_TONE[m.status] || "gray"} />
+                    <StatusBadge
+                      label={awaitingBuyer ? "Waiting for buyer" : (MATCH_STATUS_LABEL[m.status] || m.status)}
+                      tone={awaitingBuyer ? "amber" : (MATCH_STATUS_TONE[m.status] || "gray")}
+                    />
 
-                    {pending && (
+                    {awaitingBuyer && (
+                      <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[11.5px] font-semibold text-blue-800">
+                        Offer sent · buyer decision pending
+                      </span>
+                    )}
+
+                    {pending && !m.isDemandOffer && (
                       <>
-                        {m.hasPhoto && <span className="rounded-full bg-green-100 px-2.5 py-1 text-[11.5px] font-semibold text-green-800">Photo attached</span>}
+                        {m.hasPhoto && demandStatusText(m) && <StatusBadge label={demandStatusText(m)} tone={demandStatusTone(m.demandStatus)} />}
                         <button type="button" disabled={busyId === m.id} onClick={() => decline(m)} className={grayBtn + " disabled:opacity-60"}>
                           Decline
                         </button>
@@ -375,7 +377,7 @@ export default function FarmerMatches(props) {
                     {confirmed && (
                       <>
                         {m.hasPhoto ? (
-                          <span className="rounded-full bg-green-100 px-2.5 py-1 text-[11.5px] font-semibold text-green-800">Photo sent</span>
+                          demandStatusText(m) ? <StatusBadge label={demandStatusText(m)} tone={demandStatusTone(m.demandStatus)} /> : null
                         ) : (
                           <button type="button" onClick={() => setPhotoFor(m)} className="flex items-center gap-1.5 rounded-md bg-[#1B5E20] px-3 py-2 text-[13px] font-semibold text-white hover:brightness-110">
                             <Camera size={14} /> Add photo

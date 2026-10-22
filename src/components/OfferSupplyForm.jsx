@@ -45,7 +45,7 @@ export default function OfferSupplyForm({ demand, onOffered }) {
 
   let blocked = "";
   if (closed) blocked = "This request is closed and no longer accepts offers.";
-  else if (demand.hasActiveOffer) blocked = "You already have an offer on this request. Review it on your Matches page.";
+  else if (demand.hasActiveOffer) blocked = "You already have an offer on this request. The buyer will review it from My Requests.";
   else if (remaining <= 0) blocked = "This request is already fully covered.";
 
   return (
@@ -172,8 +172,7 @@ export default function OfferSupplyForm({ demand, onOffered }) {
           </fieldset>
 
           <p className="rounded-lg bg-[#F4F7F3] p-2.5 text-[12px] text-gray-600">
-            A pending offer reserves this quantity until you confirm or decline it on your Matches page.
-            Other farmers see it as covered meanwhile.
+            Your offer temporarily reserves this quantity while the buyer reviews it in My Requests. You do not need to accept or decline your own offer.
           </p>
 
           <Notice>{vm.error}</Notice>

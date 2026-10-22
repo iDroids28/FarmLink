@@ -14,7 +14,7 @@ const time = (v) => (v ? new Date(v).getTime() || 0 : 0);
 const kindLabel = (t) => (t === "expected" ? "Pre-order (expected harvest)" : "On-hand");
 const tellBell = () => window.dispatchEvent(new Event("farmlink:notices-read"));
 
-function MatchNoticeModal({ matchId, role, onClose, onChanged }) {
+function MatchNoticeModal({ matchId, role, onClose, onChanged, onNavigate }) {
   const [s, setS] = useState(null);
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
@@ -55,7 +55,7 @@ function MatchNoticeModal({ matchId, role, onClose, onChanged }) {
         ["This match", `${formatQty(s.quantity)} ${s.unit} of ${s.product}`],
         ["Buyer requested (total)", `${formatQty(s.requestedQuantity)} ${s.unit}`],
         ["Confirmed", `${formatQty(s.confirmedQuantity)} ${s.unit}`],
-        ["Waiting for farmer", `${formatQty(s.pendingQuantity)} ${s.unit}`],
+        [s.isDemandOffer ? (role === "buyer" ? "Pending offer quantity" : "Offer awaiting buyer") : "Waiting for farmer", `${formatQty(s.pendingQuantity)} ${s.unit}`],
         ["Still needed after this match", `${formatQty(s.remainingQuantity)} ${s.unit}`],
         ["Needed by", formatDate(s.neededDate)],
         ["Available from", formatDate(s.availabilityDate)],
@@ -100,24 +100,42 @@ function MatchNoticeModal({ matchId, role, onClose, onChanged }) {
               ))}
             </dl>
 
-            {pending && role === "farmer" && (
+            {pending && role === "farmer" && s.isDemandOffer && (
+              <p className="rounded-xl bg-blue-50 p-3 text-[12.5px] text-blue-800">
+                Your offer has been sent to the buyer. The buyer will review the product photo and decide whether to accept or decline. No action is needed from you yet.
+              </p>
+            )}
+
+            {pending && role === "farmer" && !s.isDemandOffer && (
               <>
                 <p className="rounded-xl bg-[#F1F8E9] p-3 text-[12.5px] text-[#33691E]">
-                  If you accept, {formatQty(s.quantity)} {s.unit} is pre-ordered for the buyer and taken
-                  off what the buyer still needs. If you decline, it goes back to the buyer's request.
+                  If you accept, {formatQty(s.quantity)} {s.unit} is reserved for the buyer. If you decline, it goes back to the buyer's request.
                 </p>
                 <div className="flex flex-wrap justify-end gap-2 border-t border-black/5 pt-4">
                   <ActionButton variant="secondary" disabled={busy} onClick={() => act(matchRepository.decline, "Match declined.")}>
                     Decline
                   </ActionButton>
-                  <ActionButton disabled={busy} onClick={() => act(matchRepository.confirm, "Match accepted. It is now pre-ordered.")}>
+                  <ActionButton disabled={busy} onClick={() => act(matchRepository.confirm, "Match accepted.")}>
                     Accept
                   </ActionButton>
                 </div>
               </>
             )}
 
-            {pending && role === "buyer" && (
+            {pending && role === "buyer" && s.isDemandOffer && (
+              <div className="space-y-3">
+                <p className="rounded-xl bg-blue-50 p-3 text-[12.5px] text-blue-800">
+                  A farmer submitted an offer for your demand. Open My Requests to review the product photo and choose Accept offer or Decline offer. Decisions for demand offers are only made there.
+                </p>
+                <div className="flex justify-end border-t border-black/5 pt-4">
+                  <ActionButton onClick={() => { onClose(); onNavigate?.("my-requests"); }}>
+                    Open My Requests <ChevronRight size={14} className="ml-1 inline" />
+                  </ActionButton>
+                </div>
+              </div>
+            )}
+
+            {pending && role === "buyer" && !s.isDemandOffer && (
               <>
                 <p className="rounded-xl bg-blue-50 p-3 text-[12.5px] text-blue-800">
                   Waiting for the farmer to accept or decline. You can cancel this match until the farmer answers.
@@ -132,7 +150,7 @@ function MatchNoticeModal({ matchId, role, onClose, onChanged }) {
 
             {!pending && (
               <p className="text-[12.5px] text-gray-500">
-                {s.status === "confirmed" ? "This match is confirmed and pre-ordered." : "This match is closed. No action is needed."}
+                {s.status === "confirmed" ? (s.isDemandOffer ? "You accepted this offer. Choose Pick Up or Delivery from Matches to finish the pre-order." : "This match is confirmed and pre-ordered.") : "This match is closed. No action is needed."}
               </p>
             )}
           </div>
@@ -267,7 +285,7 @@ export default function Notifications({ user, intent, onNavigate }) {
     <div className="space-y-6">
       <PageHeader
         title="Notification"
-        subtitle="Click a notification to see its details and respond. Unread ones have a red number until you open them."
+        subtitle="Open notifications for details. Offers farmers submit for your demands are accepted or declined from My Requests."
       />
 
       {unreadCount > 0 && (
@@ -328,7 +346,7 @@ export default function Notifications({ user, intent, onNavigate }) {
       )}
 
       {openMatchId && (
-        <MatchNoticeModal matchId={openMatchId} role={role} onClose={() => setOpenMatchId(null)} onChanged={loadFresh} />
+        <MatchNoticeModal matchId={openMatchId} role={role} onClose={() => setOpenMatchId(null)} onChanged={loadFresh} onNavigate={onNavigate} />
       )}
       {openNotice && <NoticeDetailModal n={openNotice} onClose={() => setOpenNotice(null)} />}
     </div>

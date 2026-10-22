@@ -67,7 +67,7 @@ export const MENU = {
     { id: "buyers",            label: "Buyers",             icon: Store },
     { id: "supply-approvals",  label: "Supply Approvals",   icon: ClipboardCheck },
     { id: "supply-management", label: "Supply Management",  icon: Package },
-    { id: "requirements",      label: "Requirements",       icon: ClipboardList },
+    { id: "requirements",      label: "Business Demand",    icon: ClipboardList },
     { id: "matchings",         label: "Matchings",          icon: Link2 },
     { id: "notifications",     label: "Notifications",      icon: Bell },
     { id: "profile",           label: "Profile",            icon: User },

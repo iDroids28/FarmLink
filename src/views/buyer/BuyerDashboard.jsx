@@ -207,7 +207,7 @@ export default function BuyerDashboard({ user, onNavigate }) {
                   </div>
                   <div className="mt-2"><ProgressBar percent={p.percent} label={`${d.product} progress`} /></div>
                   <p className="mt-2 text-[11.5px] leading-5 text-gray-500 sm:text-[12px]">
-                    Confirmed {formatQty(p.confirmed)} <span className="mx-1 text-gray-300">·</span> Waiting for farmer {formatQty(p.pending)} <span className="mx-1 text-gray-300">·</span> Remaining {formatQty(p.remaining)} {d.unit}
+                    Confirmed {formatQty(p.confirmed)} <span className="mx-1 text-gray-300">·</span> Pending confirmation {formatQty(p.pending)} <span className="mx-1 text-gray-300">·</span> Remaining {formatQty(p.remaining)} {d.unit}
                   </p>
                 </button>
               );

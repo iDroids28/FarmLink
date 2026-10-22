@@ -1,6 +1,7 @@
 import express from "express";
 import mongoose from "mongoose";
 import { Supply, Demand } from "./farmModels.js";
+import { Match } from "./matchModel.js";
 import { PreOrderRequest } from "./requestRoutes.js";
 import { authenticate, requireRole, writeLimiter } from "./security.js";
 import { respondWithSafeError } from "./safeErrors.js";
@@ -465,7 +466,20 @@ export default function createSupplyRouter() {
 
       if (role === "buyer") {
         out.matches = await unread(MATCH_TYPES);
-        out.requests = await unread(BUYER_REQUEST_TYPES); // My Requests: accepted / declined
+        // My Requests badge includes unread direct-request outcomes and every pending
+        // farmer offer attached to one of this buyer's posted demands.
+        const directRequestNotices = await unread(BUYER_REQUEST_TYPES);
+        const pendingMatches = await Match.find({ buyer: req.user.id, status: "pending_confirmation" })
+          .select("supply")
+          .lean();
+        const pendingSupplyIds = pendingMatches.map((m) => m.supply).filter(Boolean);
+        const pendingDemandOffers = pendingSupplyIds.length
+          ? await Supply.countDocuments({
+              _id: { $in: pendingSupplyIds },
+              targetDemand: { $type: "objectId" },
+            })
+          : 0;
+        out.requests = directRequestNotices + pendingDemandOffers;
         out.preorders = await unread(["order_status"]); // My Pre Orders: new order steps
       }
 

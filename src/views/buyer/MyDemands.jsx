@@ -122,8 +122,13 @@ export default function MyDemands({ onNavigate, intent }) {
           <p className="font-medium">{r.product}</p>
           {r.category && <p className="text-[11px] text-[#55815A]">{r.category}</p>}
           <p className="text-[11.5px] text-gray-500">
-            {r.location} | Need: {formatQty(r.quantity)} {r.unit} | Confirmed: {formatQty(r.confirmedQuantity ?? 0)} | Waiting for farmer: {formatQty(r.pendingQuantity ?? 0)} | Remaining: {formatQty(r.remainingQuantity)}
+            {r.location} | Need: {formatQty(r.quantity)} {r.unit} | Confirmed: {formatQty(r.confirmedQuantity ?? 0)} | Pending confirmation: {formatQty(r.pendingQuantity ?? 0)} | Remaining: {formatQty(r.remainingQuantity)}
           </p>
+          {r.adminRemovalReason && (
+            <p className="mt-1 rounded-md bg-amber-50 px-2 py-1.5 text-[11.5px] text-amber-900">
+              Removed by FarmLink admin: {r.adminRemovalReason}
+            </p>
+          )}
         </div>
       ),
     },

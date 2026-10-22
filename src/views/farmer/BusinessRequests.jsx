@@ -123,7 +123,7 @@ export default function BusinessRequests() {
                   />
 
                   <p className="mt-1 text-[11.5px] text-gray-500">
-                    Confirmed {formatQty(p.confirmed)} · Waiting for farmer{" "}
+                    Confirmed {formatQty(p.confirmed)} · Pending response{" "}
                     {formatQty(p.pending)} · Remaining{" "}
                     {formatQty(p.remaining)} {d.unit}
                   </p>
@@ -166,7 +166,9 @@ export default function BusinessRequests() {
 
                           <StatusBadge
                             label={
-                              MATCH_STATUS_LABEL[c.status] || c.status
+                              c.status === "pending_confirmation"
+                                ? "Pending response"
+                                : (MATCH_STATUS_LABEL[c.status] || c.status)
                             }
                             tone={
                               MATCH_STATUS_TONE[c.status] || "gray"

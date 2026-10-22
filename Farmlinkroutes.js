@@ -1,6 +1,12 @@
 import express from "express";
+import mongoose from "mongoose";
 import { authenticate } from "./security.js";
 import { Application, Requirement, Supply, Notification } from "./farmlinkModels.js";
+import { Demand as FarmDemand, Supply as FarmSupply } from "./farmModels.js";
+import { Match as FarmMatch } from "./matchModel.js";
+import { businessProfileFor } from "./businessProfile.js";
+import { removeDemandAsAdmin } from "./matchingEngine.js";
+import { notify } from "./noticeModel.js";
 
 const UNITS = ["kg", "sack", "piece", "bundle"];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -261,14 +267,23 @@ export default function createFarmlinkRouter({ User }) {
 
   router.get("/admin/farmers", admin, wrap(async (req, res) => {
     const users = await User.find({ role: "farmer" }).select("name email").lean();
-    const apps = await Application.find({ status: "Approved", user: { $in: users.map((u) => u._id) } })
-      .sort({ createdAt: 1 }).lean();
+    const userIds = users.map((u) => u._id);
+    const [apps, profiles] = await Promise.all([
+      Application.find({ status: "Approved", user: { $in: userIds } }).sort({ createdAt: 1 }).lean(),
+      // Read both ObjectId and legacy string userId values without exposing other profile fields.
+      Application.db.collection("profiles").find(
+        { userId: { $in: [...userIds, ...userIds.map((id) => String(id))] } },
+        { projection: { userId: 1, photo: 1 } }
+      ).toArray(),
+    ]);
     const byUser = new Map(apps.map((a) => [String(a.user), a]));
+    const photoByUser = new Map(profiles.map((p) => [String(p.userId), p.photo || ""]));
     res.json({
       farmers: users.map((u) => {
         const a = byUser.get(String(u._id)) || {};
         return {
           id: String(u._id), name: u.name, email: u.email,
+          photo: photoByUser.get(String(u._id)) || "",
           farmName: a.farmName, location: a.location, contact: a.contact, farmSize: a.farmSize, products: a.products,
         };
       }),
@@ -277,7 +292,7 @@ export default function createFarmlinkRouter({ User }) {
 
   router.get("/admin/buyers", admin, wrap(async (req, res) => {
     const users = await User.find({ role: "buyer" }).select("name email").lean();
-    const counts = await Requirement.aggregate([{ $group: { _id: "$buyer", n: { $sum: 1 } } }]);
+    const counts = await FarmDemand.aggregate([{ $group: { _id: "$buyer", n: { $sum: 1 } } }]);
     const map = new Map(counts.map((c) => [String(c._id), c.n]));
     res.json({
       buyers: users.map((u) => ({ id: String(u._id), name: u.name, email: u.email, reqCount: map.get(String(u._id)) || 0 })),
@@ -290,29 +305,151 @@ export default function createFarmlinkRouter({ User }) {
   }));
 
   router.get("/admin/requirements", admin, wrap(async (req, res) => {
-    const { reqs, info } = await matching();
-    res.json({ requirements: reqs.map((r) => ({ ...ser(r, "REQ"), ...info[String(r._id)] })).reverse() });
+    const demands = await FarmDemand.find()
+      .populate("buyer", "name email role")
+      .sort({ createdAt: -1 })
+      .lean();
+    const demandIds = demands.map((d) => d._id);
+    const confirmedDemands = demandIds.length
+      ? await FarmMatch.distinct("demand", { demand: { $in: demandIds }, status: "confirmed" })
+      : [];
+    const confirmed = new Set(confirmedDemands.map(String));
+    res.json({ requirements: demands.map((d) => ({
+      id: String(d._id),
+      code: `DEM-${String(d._id).slice(-5).toUpperCase()}`,
+      buyerId: d.buyer?._id ? String(d.buyer._id) : String(d.buyer || ""),
+      buyerName: d.buyer?.name || "Business / Buyer",
+      buyerEmail: d.buyer?.email || "",
+      product: d.product,
+      category: d.category || "",
+      quantity: d.quantity,
+      unit: d.unit,
+      neededDate: d.neededDate,
+      location: d.location,
+      status: d.status,
+      matchedQuantity: Number(d.matchedQuantity || 0),
+      adminRemovalReason: d.adminRemovalReason || "",
+      adminRemovedAt: d.adminRemovedAt || null,
+      canRemove: !confirmed.has(String(d._id)) && !["cancelled", "expired", "completed"].includes(d.status),
+      createdAt: d.createdAt,
+    })) });
+  }));
+
+  router.get("/admin/buyers/:id/profile", admin, wrap(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Buyer not found." });
+    const buyer = await User.findById(req.params.id).select("name email role createdAt verificationStatus").lean();
+    if (!buyer || buyer.role !== "buyer") return res.status(404).json({ error: "Buyer not found." });
+    const Profile = mongoose.models.Profile;
+    const stored = Profile
+      ? await Profile.findOne({ userId: buyer._id }).select("photo phone address business").lean()
+      : null;
+    // Some older profile records may store userId as a string rather than an ObjectId.
+    // Read the same profiles collection as a fallback so a saved profile photo is not missed.
+    const needsPhotoFallback = typeof stored?.photo !== "string" || !stored.photo.trim();
+    const storedFallback = needsPhotoFallback
+      ? await mongoose.connection.collection("profiles").findOne(
+          { $or: [{ userId: buyer._id }, { userId: String(buyer._id) }] },
+          { projection: { photo: 1, phone: 1, address: 1, business: 1 } }
+        )
+      : null;
+    const profilePhoto =
+      (typeof stored?.photo === "string" && stored.photo.trim() ? stored.photo : "") ||
+      (typeof storedFallback?.photo === "string" && storedFallback.photo.trim() ? storedFallback.photo : "");
+    const approved = await businessProfileFor(buyer._id);
+    const pBusiness = stored?.business || storedFallback?.business || {};
+    res.json({
+      buyer: {
+        id: String(buyer._id), name: buyer.name || "Business / Buyer", email: buyer.email || "",
+        role: buyer.role, verificationStatus: buyer.verificationStatus || "none", createdAt: buyer.createdAt,
+      },
+      profile: {
+        photo: profilePhoto, phone: stored?.phone || storedFallback?.phone || approved?.mobile || "", address: stored?.address || storedFallback?.address || approved?.businessAddress || "",
+        businessName: approved?.businessName || pBusiness.name || "",
+        businessType: approved?.businessType || pBusiness.orgType || "",
+        businessAddress: approved?.businessAddress || pBusiness.address || "",
+        representative: approved?.representative || pBusiness.contactPerson || "",
+        businessEmail: approved?.businessEmail || buyer.email || "",
+        mobile: approved?.mobile || stored?.phone || "",
+      },
+    });
+  }));
+
+  router.post("/admin/requirements/:id/remove", admin, wrap(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Demand not found." });
+    const reason = str(req.body?.reason, 500);
+    if (reason.length < 5) return bad(res, "Please provide a removal reason of at least 5 characters.");
+    const demand = await FarmDemand.findById(req.params.id).select("buyer product quantity unit status").lean();
+    if (!demand) return res.status(404).json({ error: "Demand not found." });
+    const result = await removeDemandAsAdmin(req.params.id, req.me._id, reason);
+    if (result === "not_found") return res.status(404).json({ error: "Demand not found." });
+    if (result !== "ok") return res.status(409).json({ error: "This demand has a confirmed pre-order or is already inactive, so it cannot be removed safely." });
+    await notify(
+      demand.buyer, "demand_removed_by_admin", "Your demand was removed",
+      `Your demand for ${demand.product} (${demand.quantity} ${demand.unit}) was removed by a FarmLink administrator. Reason: ${reason}`,
+      null, null, req.params.id
+    );
+    res.json({ ok: true, reason });
   }));
 
   router.get("/admin/matchings", admin, wrap(async (req, res) => {
-    const { reqs, sups, rows } = await matching();
-    const map = {};
-    reqs.filter((r) => !r.closed).forEach((r) => {
-      const k = r.product.toLowerCase();
-      map[k] = map[k] || { product: r.product, demand: 0, supply: 0 };
-      map[k].demand += r.quantity;
+    const manilaParts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+    const manilaToday = `${manilaParts.find((x) => x.type === "year")?.value}-${manilaParts.find((x) => x.type === "month")?.value}-${manilaParts.find((x) => x.type === "day")?.value}`;
+    const todayStart = new Date(`${manilaToday}T00:00:00+08:00`);
+    const legacyExpiryCutoff = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000);
+    const [matchDocs, demands, supplies] = await Promise.all([
+      FarmMatch.find()
+        .populate("buyer", "name email role")
+        .populate("farmer", "name email role")
+        .populate("demand", "status quantity adminRemovalReason")
+        .populate("supply", "status supplyType category targetDemand")
+        .sort({ createdAt: -1 })
+        .lean(),
+      FarmDemand.find({ status: { $in: ["open", "potential_match", "pending_confirmation", "partially_matched", "matched"] } }).select("product unit quantity matchedQuantity status").lean(),
+      FarmSupply.find({
+        status: "available", approvalStatus: "approved", availableQuantity: { $gt: 0 },
+        $or: [
+          { supplyType: { $ne: "onhand" } },
+          { supplyType: "onhand", expiresAt: { $gte: todayStart } },
+          { supplyType: "onhand", $and: [ { $or: [{ expiresAt: { $exists: false } }, { expiresAt: null }] }, { createdAt: { $gte: legacyExpiryCutoff } } ] },
+        ],
+      }).select("product unit availableQuantity").lean(),
+    ]);
+    const confirmedIds = new Set(matchDocs.filter((m) => m.status === "confirmed" && m.demand?._id).map((m) => String(m.demand._id)));
+    const rows = matchDocs.map((m) => {
+      const demandId = m.demand?._id ? String(m.demand._id) : String(m.demand || "");
+      const demandStatus = m.demand?.status || "unknown";
+      return {
+        id: String(m._id), code: `MAT-${String(m._id).slice(-5).toUpperCase()}`,
+        demandId, demandStatus, adminRemovalReason: m.demand?.adminRemovalReason || "",
+        buyerId: m.buyer?._id ? String(m.buyer._id) : String(m.buyer || ""),
+        buyerName: m.buyer?.name || "Business / Buyer", buyerEmail: m.buyer?.email || "",
+        farmerId: m.farmer?._id ? String(m.farmer._id) : String(m.farmer || ""),
+        farmerName: m.farmer?.name || "Farmer", farmerEmail: m.farmer?.email || "",
+        product: m.product, quantity: m.quantity, unit: m.unit, location: m.location,
+        neededDate: m.neededDate, availabilityDate: m.availabilityDate, status: m.status,
+        createdAt: m.createdAt,
+        canRemoveDemand: Boolean(demandId) && !confirmedIds.has(demandId) && !["cancelled", "expired", "completed", "unknown"].includes(demandStatus),
+      };
     });
-    sups.forEach((s) => {
-      const k = s.product.toLowerCase();
-      map[k] = map[k] || { product: s.product, demand: 0, supply: 0 };
-      map[k].supply += s.quantity;
-    });
-    const balance = Object.values(map).map((m) => ({
-      ...m,
-      result: m.demand > m.supply ? "Shortage" : m.supply > m.demand ? "Surplus" : "Balanced",
-      diff: Math.abs(m.demand - m.supply),
-    }));
-    res.json({ rows, balance });
+    const map = new Map();
+    const keyFor = (product, unit) => `${String(product || "").trim().toLowerCase()}::${String(unit || "").trim().toLowerCase()}`;
+    const add = (product, unit, field, value) => {
+      const k = keyFor(product, unit);
+      if (!map.has(k)) map.set(k, { product, unit, demand: 0, supply: 0 });
+      map.get(k)[field] += Number(value || 0);
+    };
+    for (const d of demands) add(d.product, d.unit, "demand", Math.max(0, Number(d.quantity || 0) - Number(d.matchedQuantity || 0)));
+    for (const s of supplies) add(s.product, s.unit, "supply", s.availableQuantity);
+    const balance = [...map.values()].map((m) => {
+      const demand = Math.round(m.demand * 100) / 100;
+      const supply = Math.round(m.supply * 100) / 100;
+      return {
+        product: m.product, unit: m.unit, demand, supply,
+        result: demand > supply ? "Shortage" : supply > demand ? "Surplus" : "Balanced",
+        diff: Math.round(Math.abs(demand - supply) * 100) / 100,
+      };
+    }).sort((a, b) => a.product.localeCompare(b.product) || a.unit.localeCompare(b.unit));
+    res.json({ rows, matches: rows, balance });
   }));
 
   router.post("/admin/announcements", admin, wrap(async (req, res) => {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Handshake, Truck, Store, X, Sprout, Camera } from "lucide-react";
+import { Handshake, Truck, Store, X, Sprout } from "lucide-react";
 import EmptyState from "../../components/EmptyState.jsx";
 import MatchesTable from "../../components/MatchesTable.jsx";
 import { PageHeader, Field, LoadNote, inputCls, primaryBtn, primaryStyle } from "../../components/DemoBits.jsx";
@@ -8,6 +8,7 @@ import { peso } from "../../components/SupplyCard.jsx";
 import useMatchViewModel from "../../viewmodels/useMatchViewModel";
 import { matchRepository } from "../../repositories/matchRepository";
 import { MATCH_STATUS_LABEL, MATCH_STATUS_TONE } from "../../models/match/Match";
+import { DEMAND_STATUS_LABEL } from "../../models/demand/Demand";
 import { getUserMessage } from "../../api/farmlinkApi.js";
 import { matchOrderApi } from "../../api/matchOrderApi.js";
 import { deliveryFee, feeText, DELIVERY_RATES } from "../../utils/deliveryFee.js";
@@ -27,6 +28,12 @@ const STEP_LABEL = {
 const grayBtn = "rounded-md bg-gray-100 px-3 py-2 text-[13px] font-semibold text-gray-700 hover:bg-gray-200";
 const isExpected = (m) => m.supplyType === "expected";
 const typeLabel = (m) => (isExpected(m) ? "Expected Harvest" : "On Hand");
+const demandStatusTone = (status) => {
+  if (["matched", "completed"].includes(status)) return "green";
+  if (["potential_match", "pending_confirmation", "partially_matched"].includes(status)) return "amber";
+  return "gray";
+};
+const demandStatusText = (m) => m.demandStatus ? (DEMAND_STATUS_LABEL[m.demandStatus] || m.demandStatus) : "";
 
 function todayStr() {
   const d = new Date();
@@ -59,7 +66,7 @@ function MatchThumb({ m }) {
   return (
     <span
       className={"flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[#E8F5E9] text-[#2E7D32] " + (photo ? "ring-2 ring-green-500" : "")}
-      title={photo ? "Photo from the farmer" : undefined}
+      title={photo ? "Product photo" : undefined}
     >
       {src && !failed ? (
         <img src={src} alt={m.product} onError={() => setFailed(true)} className="h-full w-full object-cover" />
@@ -167,9 +174,9 @@ function MatchDetails({ m, onClose, onDone, onNavigate }) {
           ) : (
             <div className="flex h-full items-center justify-center text-[#2E7D32]"><Sprout size={38} /></div>
           )}
-          {farmerPhoto && (
-            <span className="absolute left-2 top-2 flex items-center gap-1.5 rounded-full bg-green-600 px-2.5 py-1 text-[11px] font-bold text-white">
-              <Camera size={12} /> Photo from the farmer
+          {farmerPhoto && demandStatusText(m) && (
+            <span className="absolute left-2 top-2 rounded-full bg-green-600 px-2.5 py-1 text-[11px] font-bold text-white">
+              {demandStatusText(m)}
             </span>
           )}
           <button type="button" onClick={onClose} aria-label="Close" className="absolute right-2 top-2 rounded-full bg-black/60 p-1.5 text-white"><X size={16} /></button>
@@ -181,7 +188,7 @@ function MatchDetails({ m, onClose, onDone, onNavigate }) {
               <h3 className="truncate text-[17px] font-bold text-[#16301F]">{m.product}</h3>
               {m.category && <p className="text-[12.5px] text-gray-500">{m.category}</p>}
             </div>
-            <span className="shrink-0 rounded-full bg-green-100 px-2.5 py-1 text-[11.5px] font-semibold text-green-800">Farmer confirmed</span>
+            <span className="shrink-0 rounded-full bg-green-100 px-2.5 py-1 text-[11.5px] font-semibold text-green-800">{m.isDemandOffer ? "Offer accepted" : "Farmer confirmed"}</span>
           </div>
 
           <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[13px]">
@@ -256,9 +263,8 @@ function MatchDetails({ m, onClose, onDone, onNavigate }) {
 }
 
 /* ---------- The page ---------- */
-// Buyers cannot accept or decline (that is the farmer's job). A pending match can be
-// cancelled. When the farmer confirms, View details shows the farmer's photo of the
-// products and lets the buyer pre-order (Pick Up or Delivery), then track it in My Pre Orders.
+// Request-specific offers are decided by the buyer. Automatic FIFO matches keep
+// the existing farmer-confirmation flow. Confirmed matches can then be pre-ordered.
 export default function BuyerMatches({ onNavigate }) {
   const vm = useMatchViewModel(); // only used if the new list cannot be loaded
   const { load: loadVm } = vm;
@@ -307,7 +313,12 @@ export default function BuyerMatches({ onNavigate }) {
     setBusyId(null);
   }
 
-  // Old table, kept as a safety net if the new list cannot be read.
+
+  const visibleRows = (rows || []).filter((m) => !m.isDemandOffer || m.status === "confirmed" || Boolean(m.order));
+  const fallbackRows = (vm.matches || []).filter((m) => !m.isDemandOffer || m.status === "confirmed" || Boolean(m.order));
+
+  // Old table, kept as a safety net if the new list cannot be read. Pending
+  // offers for a buyer-created demand belong in My Requests, never this page.
   if (fallback) {
     return (
       <div className="space-y-4">
@@ -316,34 +327,34 @@ export default function BuyerMatches({ onNavigate }) {
         <Notice type="error">{vm.error}</Notice>
         <Notice type="success">{vm.success}</Notice>
         <MatchesTable
-          rows={vm.matches}
           dateKey="availabilityDate"
           dateLabel="Available From"
-          subtitle="Your requirements matched with farmers' supply. Farmers accept or decline each match. While a match is pending you can cancel it."
+          subtitle="Pending offers for your demands are in My Requests. This page is for automatic matches and accepted offers that need pickup or delivery details."
           onCancel={vm.cancel}
           busy={vm.submitting}
+          rows={fallbackRows}
         />
       </div>
     );
   }
 
-  const detail = detailId ? (rows || []).find((m) => m.id === detailId) : null;
+  const detail = detailId ? visibleRows.find((m) => m.id === detailId) : null;
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Matches"
-        subtitle="Your requirements matched with farmers' supply. When a farmer confirms, tap View details to see the farmer's photo of the products, choose Pick Up or Delivery and pre-order. Track it in My Pre Orders."
+        subtitle="Automatic matches wait for farmer confirmation. Offers for your demands are reviewed in My Requests; accepted offers can be continued here to choose Pick Up or Delivery."
       />
       <LoadNote loading={rows === null && !error} error="" />
       <Notice type="error">{actionError}</Notice>
       <Notice type="success">{note}</Notice>
 
-      {rows !== null && rows.length === 0 ? (
+      {rows !== null && visibleRows.length === 0 ? (
         <EmptyState icon={Handshake} title="No matches yet" message="When your requirements match a farmer's supply, they show here." />
       ) : (
         <div className="space-y-3">
-          {(rows || []).map((m) => {
+          {visibleRows.map((m) => {
             const confirmed = m.status === "confirmed";
             const pending = m.status === "pending_confirmation";
             return (
@@ -370,10 +381,8 @@ export default function BuyerMatches({ onNavigate }) {
                       </button>
                     )}
 
-                    {confirmed && m.hasPhoto && !m.order && (
-                      <span className="flex items-center gap-1 rounded-full bg-green-100 px-2.5 py-1 text-[11.5px] font-semibold text-green-800">
-                        <Camera size={12} /> Farmer's photo
-                      </span>
+                    {confirmed && m.hasPhoto && !m.order && demandStatusText(m) && (
+                      <StatusBadge label={demandStatusText(m)} tone={demandStatusTone(m.demandStatus)} />
                     )}
 
                     {confirmed && !m.order && (

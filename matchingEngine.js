@@ -5,9 +5,10 @@ import { notify } from "./noticeModel.js";
 import { breakdownFor } from "./demandBreakdown.js";
 import { MatchPhoto } from "./matchPhotoModel.js";
 
-/* FIFO matching. Supply is allocated oldest-first (createdAt). A match is only
-   POTENTIAL (pending_confirmation); the farmer confirms or declines later.
-   Quantity is held on the supply right away so it cannot be given twice. */
+/* FIFO matching. Supply is allocated oldest-first (createdAt). A match starts
+   pending_confirmation and is decided by the appropriate party: farmers decide
+   ordinary FIFO matches, while buyers decide offers submitted to a specific demand.
+   Quantity is held immediately so it cannot be allocated twice. */
 
 const ACTIVE_DEMAND = ["open", "potential_match", "partially_matched"];
 const SYNCABLE_DEMAND = [...ACTIVE_DEMAND, "matched"];
@@ -168,16 +169,29 @@ async function allocate(supply, demand, rawQty, opts = {}) {
   }
 
   const kind = kindOf(supply.supplyType);
-  const note = opts.notice || {
-    title: "New match request",
-    message: `A buyer needs ${qty} ${supply.unit} of ${supply.product} (${kind}). Open this notification to accept or decline.`,
-  };
-  await notify(supply.farmer, "match_created", note.title, note.message, match._id);
-  await notify(
-    demand.buyer, "match_created", "Match found",
-    `A farmer's ${kind} supply matches your request: ${qty} ${supply.unit} of ${supply.product}. Waiting for the farmer to accept.`,
-    match._id
-  );
+  if (supply.targetDemand) {
+    await notify(
+      supply.farmer, "match_created", "Offer submitted",
+      `Your offer for ${qty} ${supply.unit} of ${supply.product} was sent to the buyer. It is waiting for the buyer's decision.`,
+      match._id
+    );
+    await notify(
+      demand.buyer, "match_created", "New farmer offer",
+      `A farmer offered ${qty} ${supply.unit} of ${supply.product} (${kind}) for your demand. Open My Requests to review and accept or decline the offer.`,
+      match._id
+    );
+  } else {
+    const note = opts.notice || {
+      title: "New match request",
+      message: `A buyer needs ${qty} ${supply.unit} of ${supply.product} (${kind}). Open this notification to accept or decline.`,
+    };
+    await notify(supply.farmer, "match_created", note.title, note.message, match._id);
+    await notify(
+      demand.buyer, "match_created", "Match found",
+      `A farmer's ${kind} supply matches your request: ${qty} ${supply.unit} of ${supply.product}. Waiting for the farmer to accept.`,
+      match._id
+    );
+  }
   return match;
 }
 
@@ -275,9 +289,24 @@ export async function matchSupplySafe(id) {
 }
 /* ---------- Stage 2: farmer decisions + buyer cancel ---------- */
 
-export async function confirmMatch(matchId, farmerId) {
+export async function confirmMatch(matchId, actorId) {
+  const candidate = await Match.findOne({ _id: matchId, status: "pending_confirmation" }).lean();
+  if (!candidate) return null;
+  // Reject stale confirmations if an admin or the buyer has already cancelled the demand.
+  const liveDemand = await Demand.findById(candidate.demand).select("status").lean();
+  if (!liveDemand || !ACTIVE_DEMAND.includes(liveDemand.status)) return null;
+  const sup = await Supply.findById(candidate.supply).select("farmer targetDemand supplyType").lean();
+  if (!sup) return null;
+
+  // Request-specific Business Request offers are proposals: the BUYER decides.
+  // General FIFO matches keep the existing farmer-confirmation workflow.
+  const isDemandOffer = Boolean(sup.targetDemand);
+  const decisionOwner = isDemandOffer ? candidate.buyer : candidate.farmer;
+  if (String(decisionOwner) !== String(actorId)) return null;
+
+  const actorField = isDemandOffer ? "buyer" : "farmer";
   const m = await Match.findOneAndUpdate(
-    { _id: matchId, farmer: farmerId, status: "pending_confirmation" },
+    { _id: candidate._id, [actorField]: actorId, status: "pending_confirmation" },
     { status: "confirmed" },
     { returnDocument: "after" }
   ).lean();
@@ -285,9 +314,22 @@ export async function confirmMatch(matchId, farmerId) {
   await syncDemandStatus(m.demand);
 
   const demand = await Demand.findById(m.demand).select("quantity status unit product").lean();
-  const sup = await Supply.findById(m.supply).select("supplyType").lean();
   const kind = kindOf(sup?.supplyType);
   const b = (await breakdownFor([m.demand])).get(String(m.demand)) || { pending: 0, confirmed: 0 };
+
+  if (isDemandOffer) {
+    await notify(
+      m.buyer, "match_confirmed", "You accepted the farmer's offer",
+      `You accepted ${m.quantity} ${m.unit} of ${m.product}. Review the confirmed match to choose Pick Up or Delivery and finish the pre-order.`,
+      m._id
+    );
+    await notify(
+      m.farmer, "match_confirmed", "Buyer accepted your offer",
+      `The buyer accepted your offer for ${m.quantity} ${m.unit} of ${m.product}. Check Matches and Order Management for next steps.`,
+      m._id
+    );
+    return m;
+  }
 
   if (demand && demand.status === "matched") {
     // Every unit is confirmed: the request is complete / pre-ordered.
@@ -311,9 +353,19 @@ export async function confirmMatch(matchId, farmerId) {
   return m;
 }
 
-export async function declineMatch(matchId, farmerId) {
+export async function declineMatch(matchId, actorId) {
+  const candidate = await Match.findOne({ _id: matchId, status: "pending_confirmation" }).lean();
+  if (!candidate) return null;
+  const supply = await Supply.findById(candidate.supply).select("farmer targetDemand").lean();
+  if (!supply) return null;
+
+  const isDemandOffer = Boolean(supply.targetDemand);
+  const decisionOwner = isDemandOffer ? candidate.buyer : candidate.farmer;
+  if (String(decisionOwner) !== String(actorId)) return null;
+  const actorField = isDemandOffer ? "buyer" : "farmer";
+
   const m = await Match.findOneAndUpdate(
-    { _id: matchId, farmer: farmerId, status: "pending_confirmation" },
+    { _id: candidate._id, [actorField]: actorId, status: "pending_confirmation" },
     { status: "declined" },
     { returnDocument: "after" }
   ).lean();
@@ -321,15 +373,28 @@ export async function declineMatch(matchId, farmerId) {
 
   await releaseSupply(m.supply, m.quantity);
   await unclaimDemand(m.demand, m.quantity);
-  await retireTargetedSupply(m.supply); // no-op for ordinary supply
+  await retireTargetedSupply(m.supply); // retires one-off offers, no-op for ordinary supply
   await syncDemandStatus(m.demand);
 
-  await notify(
-    m.buyer, "match_declined", "Match declined",
-    `A farmer declined ${m.quantity} ${m.unit} of ${m.product}. FarmLink is looking for the next available supply.`,
-    m._id
-  );
-  // and the freed quantity may serve another waiting demand.
+  if (isDemandOffer) {
+    await notify(
+      m.farmer, "match_declined", "Buyer declined your offer",
+      `The buyer declined your offer for ${m.quantity} ${m.unit} of ${m.product}. The offered quantity has been released.`,
+      m._id
+    );
+    await notify(
+      m.buyer, "match_declined", "Offer declined",
+      `You declined the farmer's offer for ${m.quantity} ${m.unit} of ${m.product}. FarmLink will look for other compatible supply.`,
+      m._id
+    );
+  } else {
+    await notify(
+      m.buyer, "match_declined", "Match declined",
+      `A farmer declined ${m.quantity} ${m.unit} of ${m.product}. FarmLink is looking for the next available supply.`,
+      m._id
+    );
+  }
+  // Freed demand may be filled by other ordinary supply; targeted supply is retired above.
   await matchDemandSafe(m.demand);
   await matchSupplySafe(m.supply);
   return m;
@@ -339,8 +404,13 @@ export async function declineMatch(matchId, farmerId) {
 // Supply is released, the request's remaining quantity goes back up, and the
 // engine looks for other supply. The same supply is not offered again.
 export async function cancelMatchByBuyer(matchId, buyerId) {
+  const candidate = await Match.findOne({ _id: matchId, buyer: buyerId, status: "pending_confirmation" }).lean();
+  if (!candidate) return null;
+  const targetSupply = await Supply.findById(candidate.supply).select("targetDemand").lean();
+  // Demand-specific offers use the explicit buyer Accept / Decline decision.
+  if (targetSupply?.targetDemand) return null;
   const m = await Match.findOneAndUpdate(
-    { _id: matchId, buyer: buyerId, status: "pending_confirmation" },
+    { _id: candidate._id, buyer: buyerId, status: "pending_confirmation" },
     { status: "cancelled" },
     { returnDocument: "after" }
   ).lean();
@@ -392,6 +462,48 @@ export async function cancelDemandWithMatches(demandId, buyerId) {
       m._id
     );
     await matchSupplySafe(m.supply); // freed quantity can serve other demands
+  }
+  return "ok";
+}
+
+// Admin soft-removal of a buyer demand. Existing confirmed matches are protected;
+// pending offers are cancelled, quantities are released, and the reason is retained.
+// Returns "ok" | "not_found" | "locked".
+export async function removeDemandAsAdmin(demandId, adminId, reason) {
+  const existing = await Demand.findById(demandId).select("status buyer product quantity unit").lean();
+  if (!existing) return "not_found";
+  if (![...ACTIVE_DEMAND, "matched", "pending_confirmation"].includes(existing.status)) return "locked";
+  if (await Match.exists({ demand: existing._id, status: "confirmed" })) return "locked";
+
+  const updated = await Demand.findOneAndUpdate(
+    { _id: existing._id, status: { $in: [...ACTIVE_DEMAND, "matched", "pending_confirmation"] } },
+    { $set: {
+      status: "cancelled",
+      adminRemovalReason: reason,
+      adminRemovedAt: new Date(),
+      adminRemovedBy: adminId,
+    } },
+    { new: true }
+  ).lean();
+  if (!updated) return "locked";
+
+  const pending = await Match.find({ demand: existing._id, status: "pending_confirmation" }).lean();
+  for (const p of pending) {
+    const m = await Match.findOneAndUpdate(
+      { _id: p._id, status: "pending_confirmation" },
+      { status: "cancelled" },
+      { new: true }
+    ).lean();
+    if (!m) continue;
+    await releaseSupply(m.supply, m.quantity);
+    await unclaimDemand(m.demand, m.quantity);
+    await retireTargetedSupply(m.supply);
+    await notify(
+      m.farmer, "demand_removed_by_admin", "Buyer demand removed",
+      `The buyer demand for ${m.product} was removed by a FarmLink administrator. Any pending offer was cancelled and its quantity released.`,
+      m._id, null, m.demand
+    );
+    await matchSupplySafe(m.supply);
   }
   return "ok";
 }
